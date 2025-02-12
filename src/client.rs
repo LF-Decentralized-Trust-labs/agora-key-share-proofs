@@ -44,7 +44,7 @@ impl SigningKey {
             ));
         }
         let mut shares = vec![SigningKeyShare::default(); num_shares];
-        let mut polynomial = DensePolyPrimeField::random(threshold, &mut rng);
+        let mut polynomial = DensePolyPrimeField::random(threshold - 1, &mut rng);
         polynomial.0[0] = self.0;
         for (i, share) in shares.iter_mut().enumerate() {
             let sc = polynomial.evaluate(&Scalar::from((i + 1) as u64));
@@ -114,7 +114,7 @@ impl SigningKey {
 
         let quotients = self.get_quotients(&poly, &encrypted_shares);
 
-        let domain_size = (threshold + 1).next_power_of_two();
+        let domain_size = (encryption_keys.len()).next_power_of_two();
         let domain =
             GeneralEvaluationDomain::<Scalar>::new(domain_size).expect("Failed to create domain");
         let aux_domain = GeneralEvaluationDomain::<Scalar>::new(domain_size * 2)
