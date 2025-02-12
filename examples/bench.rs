@@ -1,7 +1,8 @@
 extern crate agora_key_share_proofs;
 
 use agora_key_share_proofs::{
-    DecryptionKeys, EncryptionKeys, KZG10CommonReferenceParams, SigningKey,
+    DecryptionKeys, EncryptionKeys, KZG10CommonReferenceParams, Signature, SigningKey,
+    VerificationKey,
 };
 use blsful::inner_types::{Field, G2Projective, Scalar};
 use rand::SeedableRng;
@@ -129,7 +130,7 @@ fn main() {
         let reconstructed = SigningKey::from_shares(&shares.0).unwrap();
         assert_eq!(sk, reconstructed);
 
-        let payloads_res = sk.generate_register_payloads(threshold + 1, &crs, &mut rng, &eks_set);
+        let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
         assert!(payloads_res.is_ok());
     }
     let client_reg_time = start.elapsed();
@@ -142,13 +143,79 @@ fn main() {
     });
     println!();
 
-    // Hot Proof
+    // generate vk, hot/cold shares to use for the next benchmarks
     let sk = SigningKey(Scalar::random(&mut rng));
-    let shares = sk.create_shares(threshold, num_parties, &mut rng).unwrap();
-    let payloads_res = sk.generate_register_payloads(threshold + 1, &crs, &mut rng, &eks_set);
-    assert!(payloads_res.is_ok());
+    let vk = VerificationKey::from(&sk);
+    let _ = sk.create_shares(threshold, num_parties, &mut rng).unwrap();
+    let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
     let payloads = payloads_res.unwrap();
 
+    // TSign
+    let message = b"dummy message";
+    println!("Producing {} threshold signatures", num_parties);
+    let start = Instant::now();
+
+    let cold_sigs = dks_set
+        .iter()
+        .map(|dk| dk.sign(vk, message))
+        .collect::<Vec<_>>();
+    // let cold_sig_time = start.elapsed();
+    // println!("done in {:?}", cold_sig_time);
+
+    let hot_sigs = payloads
+        .iter()
+        .zip(eks_set.iter())
+        .map(|(payload, eks)| eks.sign(payload.encrypted_share, message))
+        .collect::<Vec<_>>();
+    // let hot_sig_time = start.elapsed();
+    // println!("done in {:?}", hot_sig_time);
+
+    let tsigs = hot_sigs
+        .iter()
+        .zip(cold_sigs.iter())
+        .map(|(hot, cold)| Signature(hot.0 - cold.0))
+        .collect::<Vec<_>>();
+    let tsig_time = start.elapsed();
+    println!("done in {:?}", tsig_time);
+
+    let tsig_avg = tsig_time / num_parties as u32;
+    println!("average time per threshold sig: {:?}", tsig_avg);
+    writeln!(file, "tsig:\t\t\t\t{:?}", tsig_avg).unwrap_or_else(|err| {
+        eprintln!("Problem writing tsig avg to file: {err}");
+        process::exit(1);
+    });
+    println!();
+
+    // Share Refresh
+
+    // Cold Proof
+    println!("Creating and verifying {} cold proofs", num_parties);
+    let mut cold_prove_time = Duration::new(0, 0);
+    let mut cold_vrfy_time = Duration::new(0, 0);
+    for (dks, eks) in dks_set.iter().zip(eks_set.iter()).collect::<Vec<_>>() {
+        let start = Instant::now();
+        let cold_proof = dks.prove(0);
+        cold_prove_time += start.elapsed();
+        let start = Instant::now();
+        let _ = cold_proof.verify(eks);
+        cold_vrfy_time += start.elapsed();
+    }
+    println!("done");
+    let cold_prove_avg = cold_prove_time / num_parties as u32;
+    println!("average time per cold prove: {:?}", cold_prove_avg);
+    writeln!(file, "cold prove:\t\t\t{:?}", cold_prove_avg).unwrap_or_else(|err| {
+        eprintln!("Problem writing cold prove avg to file: {err}");
+        process::exit(1);
+    });
+    let cold_vrfy_avg = cold_vrfy_time / num_parties as u32;
+    println!("average time per cold vrfy: {:?}", cold_vrfy_avg);
+    writeln!(file, "cold vrfy:\t\t\t{:?}", cold_vrfy_avg).unwrap_or_else(|err| {
+        eprintln!("Problem writing cold vrfy avg to file: {err}");
+        process::exit(1);
+    });
+    println!();
+
+    // Hot Proof
     println!("Creating and verifying {} hot proofs", num_parties);
     let mut hot_prove_time = Duration::new(0, 0);
     let mut hot_vrfy_time = Duration::new(0, 0);
