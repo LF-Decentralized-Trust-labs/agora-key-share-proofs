@@ -1,8 +1,8 @@
 extern crate agora_key_share_proofs;
 
 use agora_key_share_proofs::{
-    DecryptionKeys, EncryptionKeys, KZG10CommonReferenceParams, Signature, SigningKey,
-    VerificationKey,
+    generate_refresh_payloads, DecryptionKeys, EncryptionKeys, KZG10CommonReferenceParams,
+    Signature, SigningKey, VerificationKey,
 };
 use blsful::inner_types::{Field, G2Projective, Scalar};
 use rand::SeedableRng;
@@ -148,7 +148,7 @@ fn main() {
     let vk = VerificationKey::from(&sk);
     let _ = sk.create_shares(threshold, num_parties, &mut rng).unwrap();
     let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
-    let payloads = payloads_res.unwrap();
+    let hot_shares = payloads_res.unwrap();
 
     // TSign
     let message = b"dummy message";
@@ -162,10 +162,10 @@ fn main() {
     // let cold_sig_time = start.elapsed();
     // println!("done in {:?}", cold_sig_time);
 
-    let hot_sigs = payloads
+    let hot_sigs = hot_shares
         .iter()
         .zip(eks_set.iter())
-        .map(|(payload, eks)| eks.sign(payload.encrypted_share, message))
+        .map(|(hot_share, eks)| eks.sign(hot_share.encrypted_share, message))
         .collect::<Vec<_>>();
     // let hot_sig_time = start.elapsed();
     // println!("done in {:?}", hot_sig_time);
@@ -187,6 +187,34 @@ fn main() {
     println!();
 
     // Share Refresh
+    println!("Doing share refreshes for {} parties", num_parties);
+    let start = Instant::now();
+    // - client generates shares of zero
+    let refresh_payload_res = generate_refresh_payloads(threshold, num_parties, &crs, rng);
+    let refresh_payloads = refresh_payload_res.unwrap();
+    // - verify the public parts of the update proof (opening at 0 and degree)
+    // TODO
+    let client_ref_time = start.elapsed();
+
+    let start = Instant::now();
+    // - hot parties update their key shares
+    for (i, (hot_share, refresh_payload)) in
+        hot_shares.iter().zip(refresh_payloads.iter()).enumerate()
+    {
+        let refresh_res = hot_share.refresh(&refresh_payload, Scalar::from((i + 1) as u64), &crs);
+        // assert!(refresh_res.is_ok()); // TODO this fails :(
+    }
+    let hot_ref_time = start.elapsed();
+    println!("done");
+
+    println!("time for client refresh: {:?}", client_ref_time);
+    let hot_ref_avg = hot_ref_time / num_parties as u32;
+    println!("average time per hot refresh: {:?}", hot_ref_avg);
+    writeln!(file, "tsig:\t\t\t\t{:?}", hot_ref_avg).unwrap_or_else(|err| {
+        eprintln!("Problem writing hot refresh avg to file: {err}");
+        process::exit(1);
+    });
+    println!();
 
     // Cold Proof
     println!("Creating and verifying {} cold proofs", num_parties);
@@ -219,9 +247,9 @@ fn main() {
     println!("Creating and verifying {} hot proofs", num_parties);
     let mut hot_prove_time = Duration::new(0, 0);
     let mut hot_vrfy_time = Duration::new(0, 0);
-    for (payload, eks) in payloads.iter().zip(eks_set.iter()) {
+    for (hot_share, eks) in hot_shares.iter().zip(eks_set.iter()) {
         let start = Instant::now();
-        let hot_proof = eks.prove(&crs, payload.encrypted_share, payload.commitment, 0);
+        let hot_proof = eks.prove(&crs, hot_share.encrypted_share, hot_share.commitment, 0);
         hot_prove_time += start.elapsed();
         let start = Instant::now();
         let _ = hot_proof.verify(&crs, 0);

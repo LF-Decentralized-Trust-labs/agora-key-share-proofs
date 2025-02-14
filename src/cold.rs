@@ -1,9 +1,10 @@
 use crate::client::VerificationKey;
-use crate::encrypt::*;
+use crate::{encrypt::*, SigningKey};
 use crate::{
-    KZG10CommonReferenceParams, KeyShareProofError, KeyShareProofResult, PedersenCommitmentParams,
-    Universal,
+    DensePolyPrimeField, KZG10CommonReferenceParams, KeyShareProofError, KeyShareProofResult,
+    PedersenCommitmentParams, Universal,
 };
+use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use blsful::inner_types::*;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -270,4 +271,92 @@ pub struct ClientRegisterPayload {
     pub commitment: G1Projective,
     /// The opening proof
     pub proof: G1Projective,
+}
+impl ClientRegisterPayload {
+    /// Use refresh value to update hot key share
+    pub fn refresh(
+        &self,
+        refresh_payload: &ClientRefreshPayload,
+        share_id: Scalar,
+        crs: &KZG10CommonReferenceParams,
+    ) -> KeyShareProofResult<ClientRegisterPayload> {
+        crs.verify(
+            &refresh_payload.commitment,
+            share_id,
+            refresh_payload.zero_share,
+            &refresh_payload.proof,
+        )?;
+
+        Ok(ClientRegisterPayload {
+            encrypted_share: self.encrypted_share + refresh_payload.zero_share,
+            verification_share: self.verification_share * refresh_payload.zero_share,
+            commitment: self.commitment + refresh_payload.commitment,
+            proof: self.proof + refresh_payload.proof,
+        })
+    }
+}
+
+/// The payload for the share refresh when refreshing encrypted shares
+#[derive(Debug, Copy, Clone, Deserialize, Serialize, Default)]
+pub struct ClientRefreshPayload {
+    /// The zero share
+    pub zero_share: Scalar,
+    /// The KZG commitment to the zero polynomial
+    pub commitment: G1Projective,
+    /// The opening proof
+    pub proof: G1Projective,
+}
+/// Generate shares of zero to refresh hot key shares
+pub fn generate_refresh_payloads(
+    threshold: usize,
+    num_shares: usize,
+    crs: &KZG10CommonReferenceParams,
+    mut rng: impl RngCore + CryptoRng,
+) -> KeyShareProofResult<Vec<ClientRefreshPayload>> {
+    let zero = SigningKey(Scalar::ZERO);
+    let (zero_shares, zero_poly) = zero.create_shares(threshold, num_shares, &mut rng)?;
+    let mut refresh_payloads = vec![ClientRefreshPayload::default(); zero_shares.len()];
+
+    // TODO: move this code block to its own function (duplicated in client.rs:115)
+    /*****************************************************************/
+    let quotients = zero.get_quotients(
+        &zero_poly,
+        &zero_shares
+            .iter()
+            .map(|share| share.share)
+            .collect::<Vec<_>>(),
+    );
+
+    let domain_size = (zero_shares.len()).next_power_of_two();
+    let domain =
+        GeneralEvaluationDomain::<Scalar>::new(domain_size).expect("Failed to create domain");
+    let aux_domain = GeneralEvaluationDomain::<Scalar>::new(domain_size * 2)
+        .expect("Failed to create aux_domain");
+
+    let t_evals = aux_domain.fft(&crs.powers_of_g);
+    let d_evals = aux_domain.fft(&quotients.0);
+
+    let dt_evals = t_evals
+        .iter()
+        .zip(d_evals.iter())
+        .map(|(t, d)| t * d)
+        .collect::<Vec<_>>();
+
+    let dt_poly = aux_domain.ifft(&dt_evals);
+    let opening_proofs = domain.fft(&dt_poly[domain_size..]);
+    // return opening_proofs
+    /*****************************************************************/
+
+    // TODO also return opening proof at 0 and dcom
+    for (i, payload) in refresh_payloads.iter_mut().enumerate() {
+        payload.zero_share = zero_shares[i].share;
+        // payload.verification_share = G2Projective::GENERATOR * shares[i].share;
+        payload.proof = opening_proofs[i];
+        payload.commitment = crs.commit_g1(&DensePolyPrimeField(vec![
+            -zero_shares[i].share,
+            Scalar::ONE,
+        ]));
+    }
+
+    Ok(refresh_payloads)
 }

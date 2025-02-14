@@ -145,7 +145,8 @@ impl SigningKey {
         Ok(register_payloads)
     }
 
-    fn get_quotients(
+    /// Get quotient polynomials
+    pub fn get_quotients(
         &self,
         fx: &DensePolyPrimeField<Scalar>,
         challenges: &[Scalar],
