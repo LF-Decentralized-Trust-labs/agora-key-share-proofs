@@ -1,10 +1,13 @@
 use crate::client::VerificationKey;
 use crate::{encrypt::*, SigningKey};
 use crate::{
-    DensePolyPrimeField, KZG10CommonReferenceParams, KeyShareProofError, KeyShareProofResult,
-    PedersenCommitmentParams, Universal,
+    // DensePolyPrimeField,
+    KZG10CommonReferenceParams,
+    KeyShareProofError,
+    KeyShareProofResult,
+    PedersenCommitmentParams,
+    Universal,
 };
-use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use blsful::inner_types::*;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -102,7 +105,7 @@ impl EncryptionKeys {
         let si = Scalar::random(&mut rand::rngs::OsRng);
         let blinded_proof = current_opening + params.h * si;
         let shift_proof =
-            G2Projective::GENERATOR * -r + (crs.powers_of_h[1] - crs.powers_of_h[0]) * -si;
+            G2Projective::GENERATOR * -r + (crs.powers_of_h[1] - crs.powers_of_h[0]) * -si; // TODO crs.powers_of_h[0] should be multiplied by party index i
         HotStorageProof {
             comm_ped,
             a_comm_ped,
@@ -263,6 +266,8 @@ impl HotStorageProof {
 /// The payload for the client registration when submitting new encrypted shares
 #[derive(Debug, Copy, Clone, Deserialize, Serialize, Default)]
 pub struct ClientRegisterPayload {
+    /// The share index
+    pub share_id: Scalar,
     /// The encrypted share
     pub encrypted_share: Scalar,
     /// The verification share
@@ -288,6 +293,7 @@ impl ClientRegisterPayload {
         )?;
 
         Ok(ClientRegisterPayload {
+            share_id,
             encrypted_share: self.encrypted_share + refresh_payload.zero_share,
             verification_share: self.verification_share * refresh_payload.zero_share,
             commitment: self.commitment + refresh_payload.commitment,
@@ -299,6 +305,8 @@ impl ClientRegisterPayload {
 /// The payload for the share refresh when refreshing encrypted shares
 #[derive(Debug, Copy, Clone, Deserialize, Serialize, Default)]
 pub struct ClientRefreshPayload {
+    /// The share index
+    pub share_id: Scalar,
     /// The zero share
     pub zero_share: Scalar,
     /// The KZG commitment to the zero polynomial
@@ -315,48 +323,68 @@ pub fn generate_refresh_payloads(
 ) -> KeyShareProofResult<Vec<ClientRefreshPayload>> {
     let zero = SigningKey(Scalar::ZERO);
     let (zero_shares, zero_poly) = zero.create_shares(threshold, num_shares, &mut rng)?;
-    let mut refresh_payloads = vec![ClientRefreshPayload::default(); zero_shares.len()];
-
-    // TODO: move this code block to its own function (duplicated in client.rs:115)
-    /*****************************************************************/
-    let quotients = zero.get_quotients(
-        &zero_poly,
-        &zero_shares
-            .iter()
-            .map(|share| share.share)
-            .collect::<Vec<_>>(),
-    );
-
-    let domain_size = (zero_shares.len()).next_power_of_two();
-    let domain =
-        GeneralEvaluationDomain::<Scalar>::new(domain_size).expect("Failed to create domain");
-    let aux_domain = GeneralEvaluationDomain::<Scalar>::new(domain_size * 2)
-        .expect("Failed to create aux_domain");
-
-    let t_evals = aux_domain.fft(&crs.powers_of_g);
-    let d_evals = aux_domain.fft(&quotients.0);
-
-    let dt_evals = t_evals
+    let challenges = zero_shares
         .iter()
-        .zip(d_evals.iter())
-        .map(|(t, d)| t * d)
+        // i+2 because verification fails when challenge = 1 (TODO why?)
+        .map(|share| share.id)
         .collect::<Vec<_>>();
+    let opening_proofs = crs.batch_open(&zero_poly, &challenges);
+    let zero_proof = crs.open(&zero_poly, Scalar::ZERO);
 
-    let dt_poly = aux_domain.ifft(&dt_evals);
-    let opening_proofs = domain.fft(&dt_poly[domain_size..]);
-    // return opening_proofs
-    /*****************************************************************/
+    let mut refresh_payloads = vec![ClientRefreshPayload::default(); zero_shares.len()];
 
     // TODO also return opening proof at 0 and dcom
     for (i, payload) in refresh_payloads.iter_mut().enumerate() {
+        payload.share_id = challenges[i];
         payload.zero_share = zero_shares[i].share;
         // payload.verification_share = G2Projective::GENERATOR * shares[i].share;
         payload.proof = opening_proofs[i];
-        payload.commitment = crs.commit_g1(&DensePolyPrimeField(vec![
-            -zero_shares[i].share,
-            Scalar::ONE,
-        ]));
+        payload.commitment = crs.commit_g1(&zero_poly)
     }
 
     Ok(refresh_payloads)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn test_refresh() {
+        let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
+        let sk = SigningKey(Scalar::random(&mut rng));
+        let threshold = 2;
+        let num_parties = 3;
+        let crs = KZG10CommonReferenceParams::setup(
+            NonZeroUsize::new(num_parties - 1).unwrap(),
+            &mut rng,
+        );
+        let domain_size = num_parties.next_power_of_two();
+        let share_ids =
+            GeneralEvaluationDomain::<Scalar>::new(domain_size).expect("Failed to create domain");
+
+        // get refresh information
+        let refresh_payloads_res = generate_refresh_payloads(threshold, num_parties, &crs, rng);
+        assert!(refresh_payloads_res.is_ok());
+
+        let refresh_payloads = refresh_payloads_res.unwrap();
+
+        // every party verifies its zero share
+        for (i, payload) in refresh_payloads.iter().enumerate() {
+            assert!(crs
+                .verify(
+                    &payload.commitment,
+                    // share_ids.element(i + 1),
+                    // Scalar::from((i + 1) as u64),
+                    payload.share_id,
+                    payload.zero_share,
+                    &payload.proof
+                )
+                .is_ok());
+        }
+    }
 }

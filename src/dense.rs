@@ -424,7 +424,14 @@ impl<F: PrimeField> DensePolyPrimeField<F> {
             0
         } else {
             // debug_assert!(self.0.last().map_or(false, |c| bool::from(!c.is_zero())));
-            self.0.len() - 1
+            // self.0.len() - 1
+            let last_term_idx = self
+                .0
+                .iter()
+                .rev()
+                .position(|c| bool::from(!c.is_zero()))
+                .unwrap_or_else(|| 0);
+            self.0.len() - 1 - last_term_idx
         }
     }
 

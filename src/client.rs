@@ -2,8 +2,9 @@ use crate::{
     ClientRegisterPayload, DensePolyPrimeField, EncryptionKeys, KZG10CommonReferenceParams,
     KeyShareProofError, KeyShareProofResult, Universal,
 };
-use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+// use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use blsful::inner_types::{Field, G2Projective, Scalar};
+// use blstrs_plus::G1Projective;
 use itertools::*;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -47,8 +48,10 @@ impl SigningKey {
         let mut polynomial = DensePolyPrimeField::random(threshold - 1, &mut rng);
         polynomial.0[0] = self.0;
         for (i, share) in shares.iter_mut().enumerate() {
-            let sc = polynomial.evaluate(&Scalar::from((i + 1) as u64));
-            share.id = Scalar::from((i + 1) as u64);
+            // i+2 because verification fails when challenge = 1 (TODO why?)
+            let challenge = Scalar::from((i + 2) as u64);
+            let sc = polynomial.evaluate(&challenge);
+            share.id = challenge;
             share.share = sc;
             share.threshold = threshold as u16;
         }
@@ -97,7 +100,8 @@ impl SigningKey {
         hot_wallet_encryption_keys: W,
     ) -> KeyShareProofResult<Vec<ClientRegisterPayload>> {
         let encryption_keys = hot_wallet_encryption_keys.as_ref();
-        let (shares, poly) = self.create_shares(threshold, encryption_keys.len(), &mut rng)?;
+        let (shares, _) = self.create_shares(threshold, encryption_keys.len(), &mut rng)?;
+        let share_ids = shares.iter().map(|share| share.id).collect::<Vec<_>>();
         let mut register_payloads = vec![ClientRegisterPayload::default(); shares.len()];
 
         let encrypted_shares = shares
@@ -112,34 +116,26 @@ impl SigningKey {
             })
             .collect::<Vec<_>>();
 
-        let quotients = self.get_quotients(&poly, &encrypted_shares);
+        let interpolated_poly = Self::interpolate_poly(&share_ids.as_slice(), &encrypted_shares);
+        // Interpolated polynomial degree should be low enough for kzg
+        assert!(interpolated_poly.degree() <= crs.powers_of_g.len());
 
-        let domain_size = (encryption_keys.len()).next_power_of_two();
-        let domain =
-            GeneralEvaluationDomain::<Scalar>::new(domain_size).expect("Failed to create domain");
-        let aux_domain = GeneralEvaluationDomain::<Scalar>::new(domain_size * 2)
-            .expect("Failed to create aux_domain");
-
-        let t_evals = aux_domain.fft(&crs.powers_of_g);
-        let d_evals = aux_domain.fft(&quotients.0);
-
-        let dt_evals = t_evals
-            .iter()
-            .zip(d_evals.iter())
-            .map(|(t, d)| t * d)
-            .collect::<Vec<_>>();
-
-        let dt_poly = aux_domain.ifft(&dt_evals);
-        let opening_proofs = domain.fft(&dt_poly[domain_size..]);
+        // moved code block to function kzg.rs
+        // let opening_proofs = crs.batch_open(&interpolated_poly, &encrypted_shares);
+        let opening_proofs = crs.batch_open(&interpolated_poly, &share_ids);
 
         for (i, payload) in register_payloads.iter_mut().enumerate() {
+            // payload.share_id = domain.element(i);
+            payload.share_id = share_ids[i];
             payload.encrypted_share = encrypted_shares[i];
             payload.verification_share = G2Projective::GENERATOR * shares[i].share;
             payload.proof = opening_proofs[i];
-            payload.commitment = crs.commit_g1(&DensePolyPrimeField(vec![
-                -encrypted_shares[i],
-                Scalar::ONE,
-            ]));
+            // TODO this seems wrong??
+            // payload.commitment = crs.commit_g1(&DensePolyPrimeField(vec![
+            //     -encrypted_shares[i],
+            //     Scalar::ONE,
+            // ]));
+            payload.commitment = crs.commit_g1(&interpolated_poly);
         }
 
         Ok(register_payloads)
@@ -151,6 +147,8 @@ impl SigningKey {
         fx: &DensePolyPrimeField<Scalar>,
         challenges: &[Scalar],
     ) -> DensePolyPrimeField<Scalar> {
+        println!("input poly fx: {:?}", fx);
+
         let mut zero_poly = DensePolyPrimeField(vec![-challenges[0], Scalar::ONE]);
         for i in 1..challenges.len() {
             zero_poly *= DensePolyPrimeField(vec![-challenges[i], Scalar::ONE]);
@@ -161,6 +159,7 @@ impl SigningKey {
         }
         let mut lagrange_poly = Self::interpolate_poly(challenges, &values);
         lagrange_poly.0.resize(fx.0.len(), Scalar::ZERO); //pad with zeros
+        println!("interpolated poly: {:?}", lagrange_poly);
 
         let mut numerator = DensePolyPrimeField(vec![Scalar::ZERO; challenges.len()]);
         for (num, (c1, c2)) in numerator
@@ -170,11 +169,17 @@ impl SigningKey {
         {
             *num = *c1 - *c2;
         }
+        // TODO this will always be zero?
+        println!("fx - interpolated poly: {:?}", numerator);
 
         numerator.poly_mod(&zero_poly).0
     }
 
-    fn interpolate_poly(challenges: &[Scalar], values: &[Scalar]) -> DensePolyPrimeField<Scalar> {
+    /// Interpolate a polynomial given some evaluations
+    pub fn interpolate_poly(
+        challenges: &[Scalar],
+        values: &[Scalar],
+    ) -> DensePolyPrimeField<Scalar> {
         debug_assert_eq!(challenges.len(), values.len());
 
         let mut result = DensePolyPrimeField(vec![Scalar::ZERO; challenges.len()]);
@@ -200,6 +205,9 @@ impl SigningKey {
             );
             result += term;
         }
+        // interpolated polynomial's degree should be <= n-1 (for n input points)
+        debug_assert!(result.degree() <= challenges.len() - 1);
+
         result
     }
 }
@@ -245,7 +253,7 @@ mod tests {
 
         let crs = KZG10CommonReferenceParams::setup(NonZeroUsize::new(4).unwrap(), &mut rng);
 
-        let dks_set = (0..3)
+        let dks_set = (0..num_shares)
             .map(|_| DecryptionKeys::random(&mut rng))
             .collect::<Vec<_>>();
         let eks_set = dks_set
@@ -255,6 +263,18 @@ mod tests {
 
         let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
         assert!(payloads_res.is_ok());
+
+        let payloads = payloads_res.unwrap();
+        for (i, payload) in payloads.iter().enumerate() {
+            assert!(crs
+                .verify(
+                    &payload.commitment,
+                    payload.share_id,
+                    payload.encrypted_share,
+                    &payload.proof
+                )
+                .is_ok());
+        }
     }
 
     #[test]
