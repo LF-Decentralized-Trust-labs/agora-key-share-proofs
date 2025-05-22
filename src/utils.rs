@@ -47,7 +47,7 @@ pub fn get_omega(n: usize) -> Scalar {
 
     let (exponent, rem) = ORDER_M1.div_rem(&n);
 
-    if rem.is_zero().into() {
+    if !bool::from(rem.is_zero()) {
         panic!("n must divide (r - 1)");
     }
 
