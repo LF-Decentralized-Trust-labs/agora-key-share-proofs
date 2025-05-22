@@ -512,6 +512,15 @@ impl<F: PrimeField> DensePolyPrimeField<F> {
         }
     }
 
+    /// Remove any leading zero coefficients from the polynomial
+    pub fn trim_leading_zeros(&mut self) {
+        let mut i = self.0.len();
+        while i > 0 && bool::from(self.0[i - 1].is_zero()) {
+            i -= 1;
+        }
+        self.0.truncate(i);
+    }
+
     /// Compute the polynomial division and return the quotient and remainder
     pub fn poly_mod(&self, m: &Self) -> (Self, Self) {
         if m.is_cyclotomic() {
