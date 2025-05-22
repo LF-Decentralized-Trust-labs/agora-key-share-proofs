@@ -49,7 +49,7 @@ impl<F: PrimeField> Display for DensePolyPrimeField<F> {
                 if power == 0 {
                     c
                 } else {
-                    format!("{}{}", c, to_super_script_digits(power + 1))
+                    format!("{}{}", c, to_super_script_digits(power))
                 }
             })
             .collect::<Vec<_>>()
@@ -410,7 +410,7 @@ impl<F: PrimeField> DensePolyPrimeField<F> {
 
     /// Check if the polynomial is zero
     pub fn is_zero(&self) -> bool {
-        self.0.is_empty()
+        self.0.is_empty() || (self.0.len() == 1 && self.0[0] == F::ZERO)
     }
 
     /// Create a polynomial with a value of 1
@@ -428,10 +428,9 @@ impl<F: PrimeField> DensePolyPrimeField<F> {
             let last_term_idx = self
                 .0
                 .iter()
-                .rev()
-                .position(|c| bool::from(!c.is_zero()))
+                .rposition(|c| bool::from(!c.is_zero()))
                 .unwrap_or_else(|| 0);
-            self.0.len() - 1 - last_term_idx
+            last_term_idx
         }
     }
 
@@ -574,8 +573,9 @@ impl<F: PrimeField> DensePolyPrimeField<F> {
         let mut remainder = self.clone();
         let mut div = Vec::with_capacity(self.0.len() - degree);
         (degree..self.0.len()).rev().for_each(|i| {
-            remainder.0[i - degree] += self.0[i];
-            div.push(self.0[i]);
+            let coeff_change = remainder.0[i];
+            remainder.0[i - degree] += coeff_change;
+            div.push(coeff_change);
         });
         (
             Self(div.into_iter().rev().collect()),
@@ -650,6 +650,18 @@ mod tests {
         let mut div_b_pr = &div_b + &rem;
         div_b_pr.trim();
         assert_eq!(a, div_b_pr);
+    }
+
+    #[test]
+    fn poly_mod_ng() {
+        let my_num = DensePolyPrimeField(vec![-Scalar::ONE, Scalar::ZERO, Scalar::ONE]);
+        // let my_num =
+        //     DensePolyPrimeField(vec![-Scalar::ONE, -Scalar::ONE, Scalar::ONE, Scalar::ONE]);
+        let my_den = DensePolyPrimeField(vec![-Scalar::ONE, Scalar::ONE]);
+        let (my_quo, my_rem) = my_num.poly_mod(&my_den);
+        let mut my_rem_trim = my_rem.clone();
+        my_rem_trim.trim();
+        assert!(my_rem_trim.is_zero());
     }
 
     #[test]

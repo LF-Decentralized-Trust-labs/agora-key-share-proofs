@@ -232,6 +232,7 @@ impl HotStorageProof {
             ),
             (
                 self.blinded_proof.to_affine(),
+                // TODO raise powers_of_h[0] to i
                 G2Prepared::from((crs.powers_of_h[1] - crs.powers_of_h[0]).to_affine()),
             ),
             (
@@ -313,6 +314,8 @@ pub struct ClientRefreshPayload {
     pub commitment: G1Projective,
     /// The opening proof
     pub proof: G1Projective,
+    /// The opening proof at zero
+    pub zero_proof: G1Projective,
 }
 /// Generate shares of zero to refresh hot key shares
 pub fn generate_refresh_payloads(
@@ -328,18 +331,19 @@ pub fn generate_refresh_payloads(
         // i+2 because verification fails when challenge = 1 (TODO why?)
         .map(|share| share.id)
         .collect::<Vec<_>>();
-    let opening_proofs = crs.batch_open(&zero_poly, &challenges);
+    let opening_proofs = crs.batch_open(&zero_poly, challenges.len());
     let zero_proof = crs.open(&zero_poly, Scalar::ZERO);
 
     let mut refresh_payloads = vec![ClientRefreshPayload::default(); zero_shares.len()];
 
-    // TODO also return opening proof at 0 and dcom
+    // TODO also return dcom
     for (i, payload) in refresh_payloads.iter_mut().enumerate() {
         payload.share_id = challenges[i];
         payload.zero_share = zero_shares[i].share;
-        // payload.verification_share = G2Projective::GENERATOR * shares[i].share;
         payload.proof = opening_proofs[i];
-        payload.commitment = crs.commit_g1(&zero_poly)
+        // payload.verification_share = G2Projective::GENERATOR * shares[i].share;
+        payload.commitment = crs.commit_g1(&zero_poly);
+        payload.zero_proof = zero_proof;
     }
 
     Ok(refresh_payloads)
@@ -386,5 +390,7 @@ mod tests {
                 )
                 .is_ok());
         }
+
+        // TODO global checks (opening at 0 and dcom)
     }
 }

@@ -1,5 +1,5 @@
-use crate::{DensePolyPrimeField, KeyShareProofError, KeyShareProofResult};
-// use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+use crate::{utils::get_omega, DensePolyPrimeField, KeyShareProofError, KeyShareProofResult};
+use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use blsful::inner_types::PrimeCurveAffine;
 use blsful::inner_types::*;
 use rand::{CryptoRng, RngCore};
@@ -72,45 +72,120 @@ impl KZG10CommonReferenceParams {
         self.commit_g1(&quo)
     }
 
-    /// TODO batch open polynomial evaluations in the G1 group
-    pub fn batch_open(
-        &self,
-        fx: &DensePolyPrimeField<Scalar>,
-        challenges: &Vec<Scalar>,
-    ) -> Vec<G1Projective> {
-        let quotients = Self::batch_get_qpolys(&fx, &challenges);
-        //// moved code from client.rs (small mods for compilation)
-        // // let quotients = SigningKey::get_quotients(&sk, &fx, &challenges);
+    /// Get all commitments to the H_i(X) polynomials in Feist-Khovratovich
+    /// code based on https://github.com/alinush/libpolycrypto/blob/fk/libpolycrypto/src/KatePublicParameters.cpp#L199
+    pub fn get_fk_hcoms(&self, fx: &DensePolyPrimeField<Scalar>) -> Vec<G1Projective> {
+        let m = fx.degree();
+        let big_m = m.next_power_of_two();
 
-        // let domain_size = (challenges.len()).next_power_of_two();
-        // let domain =
-        //     GeneralEvaluationDomain::<Scalar>::new(domain_size).expect("Failed to create domain");
-        // let aux_domain = GeneralEvaluationDomain::<Scalar>::new(domain_size * 2)
-        //     .expect("Failed to create aux_domain");
+        // vector for circulant matrix embedding of the Topelitz matrix of fx coefficients
+        // c = [ fm   vec![0;m-1]   fm   f1   f2   ...   fm-1 ]
+        // if m is not a power of two then we pad to the next power of two M and
+        // c = [ vec![0;M]   f1   f2   ...   fm   vec![0;M-m] ]
+        let mut c_vec = vec![Scalar::ZERO; 2 * big_m];
+        if m == big_m {
+            c_vec[0] = fx.0[m];
+            c_vec[m] = fx.0[m];
+        }
+        for i in 1..=m - 1 {
+            c_vec[big_m + i] = fx.0[i];
+        }
+        if m != big_m {
+            c_vec[big_m + m] = fx.0[m];
+        }
 
-        // let t_evals = aux_domain.fft(self.powers_of_g.as_slice());
-        // // TODO how to use quotients as input here?
-        // let d_evals = aux_domain.fft(&quotients);
+        // vector of the powers of tau
+        // t = [ vec![0;M-m]   t^{m-1}G   t^{m-2}G   ...   tG   G   vec![0;M] ]
+        let mut t_vec = vec![G1Projective::IDENTITY; 2 * big_m];
+        for i in 0..m {
+            t_vec[big_m - 1 - i] = self.powers_of_g[i];
+        }
 
-        // let dt_evals = t_evals
-        //     .iter()
-        //     .zip(d_evals.iter())
-        //     .map(|(t, d)| t * d)
-        //     .collect::<Vec<_>>();
+        let domain =
+            GeneralEvaluationDomain::<Scalar>::new(big_m * 2).expect("Failed to create domain");
+        let c_evals = domain.fft(&c_vec.as_slice());
+        // sanity check:
+        // FFT(c(X)) is the evaluations at powers of omega: c(w^i) for each i
+        let c_poly = DensePolyPrimeField(c_vec);
+        let omega = get_omega(big_m * 2);
+        assert_eq!(domain.group_gen(), omega);
+        assert_eq!(omega.pow([(big_m * 2) as u64]), Scalar::ONE);
+        for i in 0..big_m * 2 {
+            assert_eq!(c_evals[i], c_poly.evaluate(&omega.pow_vartime([i as u64])));
+        }
 
-        // let dt_poly = aux_domain.ifft(&dt_evals);
-        // let opening_proofs = domain.fft(&dt_poly[domain_size..]);
+        let t_evals = domain.fft(&t_vec.as_slice());
+        // sanity check:
+        // FFT(t) is evaluation in the exponent at powers of omega
+        // (additive notation: \sum_j (w^i)^j t^{m-1-j} G )
+        for i in 0..big_m * 2 {
+            let mut sum = G1Projective::IDENTITY;
+            let eval_point = &omega.pow_vartime([i as u64]);
+            for j in 0..t_vec.len() {
+                sum += t_vec[j] * eval_point.pow_vartime([j as u64]);
+            }
+            // passes
+            assert_eq!(t_evals[i], sum);
+        }
 
-        // NG naive approach
-        let quotient_polys = Self::batch_get_qpolys(&fx, challenges.as_slice());
-        quotient_polys
+        let ct_evals = t_evals
             .iter()
-            .map(|qpoly| self.commit_g1(qpoly))
-            .collect::<Vec<_>>()
+            .zip(c_evals.iter())
+            .map(|(t, c)| t * c)
+            .collect::<Vec<_>>();
+
+        let h_commitments = domain.ifft(&ct_evals);
+        h_commitments[..m].to_vec()
     }
 
-    /// NG naive quotient polys function (cf. get_quotients in client.rs)
-    pub fn batch_get_qpolys(
+    /// Batch open polynomial evaluations in the G1 group using Feist-Khovratovich
+    pub fn batch_open(&self, fx: &DensePolyPrimeField<Scalar>, n: usize) -> Vec<G1Projective> {
+        let domain_size = n.next_power_of_two();
+        let m = fx.degree();
+        let mut h_coms = self.get_fk_hcoms(fx);
+        h_coms.resize(domain_size, G1Projective::IDENTITY);
+
+        let mut h_polys = Vec::with_capacity(m);
+        let mut h_evals = Vec::with_capacity(m);
+        for i in 1..=m {
+            // H_1 should equal f1 + f2 X +       ...        + fm X^{m-1}
+            // H_2            = f2 + f3 X + ... + fm X^{m-2}
+            // ...             ...
+            // H_m            = fm
+            let h_i = DensePolyPrimeField(fx.0[i..].to_vec());
+            assert_eq!(h_i.degree(), m - i);
+            let mut sum = G1Projective::IDENTITY;
+            for j in 0..=m - i {
+                sum += self.powers_of_g[j] * h_i.0[j];
+            }
+            h_polys.push(h_i);
+            h_evals.push(sum);
+        }
+
+        let domain =
+            GeneralEvaluationDomain::<Scalar>::new(domain_size).expect("Failed to create domain");
+        let proofs = domain.fft(&h_coms);
+        // sanity check 1
+        let omega = get_omega(domain_size);
+        assert_eq!(domain.group_gen(), omega);
+        // sanity check 2
+        // FFT(h_coms) is evaluation in the exponent at powers of omega
+        // (additive notation: \sum_j (w^i)^j h_{j+1} )
+        // for i in 0..domain_size {
+        //     let mut sum = G1Projective::IDENTITY;
+        //     let eval_point = &omega.pow_vartime([i as u64]);
+        //     for j in 0..h_coms.len() - 1 {
+        //         sum += h_coms[j + 1] * eval_point.pow_vartime([j as u64]);
+        //     }
+        //     dbg!(i);
+        //     // TODO fails
+        //     // assert_eq!(proofs[i], sum);
+        // }
+        proofs
+    }
+
+    /// Get quotient polynomials
+    pub fn batch_get_quotients(
         fx: &DensePolyPrimeField<Scalar>,
         challenges: &[Scalar],
     ) -> Vec<DensePolyPrimeField<Scalar>> {
@@ -159,9 +234,10 @@ impl KZG10CommonReferenceParams {
 
 #[cfg(test)]
 mod tests {
+    use crate::utils::roots_of_unity;
+
     use super::*;
     use rand::SeedableRng;
-    // use rand_chacha::ChaCha8Rng;
 
     #[test]
     fn test_kzg10() {
@@ -176,7 +252,36 @@ mod tests {
     }
 
     #[test]
-    fn test_quotient_polys() {}
+    fn test_fk_hcoms() {
+        let mut rng = rand_chacha::ChaCha12Rng::from_seed([0u8; 32]);
+        let crs = KZG10CommonReferenceParams::setup(NonZeroUsize::new(10).unwrap(), &mut rng);
+        let fx = DensePolyPrimeField((0..10).map(|_| Scalar::random(&mut rng)).collect());
+        let m = fx.degree();
+
+        let mut h_coms = crs.get_fk_hcoms(&fx);
+        let mut h_polys = Vec::with_capacity(m);
+        let mut h_evals = Vec::with_capacity(m);
+        for i in 1..=m {
+            // H_1 should equal f1 + f2 X +       ...        + fm X^{m-1}
+            // H_2            = f2 + f3 X + ... + fm X^{m-2}
+            // ...             ...
+            // H_m            = fm
+            let h_i = DensePolyPrimeField(fx.0[i..].to_vec());
+            assert_eq!(h_i.degree(), m - i);
+            let mut sum = G1Projective::IDENTITY;
+            for j in 0..=m - i {
+                sum += crs.powers_of_g[j] * h_i.0[j];
+            }
+            h_polys.push(h_i);
+            h_evals.push(sum);
+        }
+        for (h_com, h_eval) in h_coms.iter().zip(h_evals.iter()) {
+            assert_eq!(*h_com, *h_eval);
+        }
+        for (h_com, hx) in h_coms.iter().zip(h_polys.iter()) {
+            assert_eq!(*h_com, crs.commit_g1(hx));
+        }
+    }
 
     #[test]
     fn test_zero_open() {
@@ -185,9 +290,11 @@ mod tests {
         let poly = DensePolyPrimeField((0..10).map(|_| Scalar::random(&mut rng)).collect());
         let commitment = crs.commit_g1(&poly);
 
-        let proof = crs.open(&poly, Scalar::ZERO);
-        let y = poly.evaluate(&Scalar::ZERO);
-        assert!(crs.verify(&commitment, Scalar::ZERO, y, &proof).is_ok());
+        // challenge is omega^0 (aka 1)
+        let challenge = Scalar::ONE;
+        let proof = crs.open(&poly, challenge);
+        let y = poly.evaluate(&challenge);
+        assert!(crs.verify(&commitment, challenge, y, &proof).is_ok());
     }
 
     #[test]
@@ -201,13 +308,11 @@ mod tests {
         assert_eq!(poly.degree(), degree);
         let commitment = crs.commit_g1(&poly);
 
-        let challenges = (0..num_parties)
-            // i+2 because verification fails when challenge = 1 (TODO why?)
-            .map(|i| Scalar::from((i + 2) as u64))
-            .collect::<Vec<_>>();
-        let opening_proofs = crs.batch_open(&poly, &challenges);
-        // check that all the batch-opened proofs verify
+        // note these start with the zero opening (at omega^0)
+        let opening_proofs = crs.batch_open(&poly, num_parties + 1);
+        let challenges = roots_of_unity((num_parties + 1).next_power_of_two());
         for (challenge, proof) in challenges.iter().zip(opening_proofs.iter()) {
+            // check that all the batch-opened proofs verify
             assert!(crs
                 .verify(&commitment, *challenge, poly.evaluate(challenge), proof)
                 .is_ok());

@@ -120,9 +120,8 @@ impl SigningKey {
         // Interpolated polynomial degree should be low enough for kzg
         assert!(interpolated_poly.degree() <= crs.powers_of_g.len());
 
-        // moved code block to function kzg.rs
         // let opening_proofs = crs.batch_open(&interpolated_poly, &encrypted_shares);
-        let opening_proofs = crs.batch_open(&interpolated_poly, &share_ids);
+        let opening_proofs = crs.batch_open(&interpolated_poly, share_ids.len());
 
         for (i, payload) in register_payloads.iter_mut().enumerate() {
             // payload.share_id = domain.element(i);
@@ -139,40 +138,6 @@ impl SigningKey {
         }
 
         Ok(register_payloads)
-    }
-
-    /// Get quotient polynomials
-    pub fn get_quotients(
-        &self,
-        fx: &DensePolyPrimeField<Scalar>,
-        challenges: &[Scalar],
-    ) -> DensePolyPrimeField<Scalar> {
-        println!("input poly fx: {:?}", fx);
-
-        let mut zero_poly = DensePolyPrimeField(vec![-challenges[0], Scalar::ONE]);
-        for i in 1..challenges.len() {
-            zero_poly *= DensePolyPrimeField(vec![-challenges[i], Scalar::ONE]);
-        }
-        let mut values = vec![Scalar::ZERO; challenges.len()];
-        for (value, challenge) in values.iter_mut().zip(challenges) {
-            *value = fx.evaluate(challenge);
-        }
-        let mut lagrange_poly = Self::interpolate_poly(challenges, &values);
-        lagrange_poly.0.resize(fx.0.len(), Scalar::ZERO); //pad with zeros
-        println!("interpolated poly: {:?}", lagrange_poly);
-
-        let mut numerator = DensePolyPrimeField(vec![Scalar::ZERO; challenges.len()]);
-        for (num, (c1, c2)) in numerator
-            .0
-            .iter_mut()
-            .zip(fx.0.iter().zip(lagrange_poly.0.iter()))
-        {
-            *num = *c1 - *c2;
-        }
-        // TODO this will always be zero?
-        println!("fx - interpolated poly: {:?}", numerator);
-
-        numerator.poly_mod(&zero_poly).0
     }
 
     /// Interpolate a polynomial given some evaluations
