@@ -298,7 +298,7 @@ impl<'de, F: PrimeField> Deserialize<'de> for DensePolyPrimeField<F> {
         } else {
             struct PolyVisitor<F: PrimeField>(PhantomData<F>);
 
-            impl<'de, F: PrimeField> Visitor<'de> for PolyVisitor<F> {
+            impl<F: PrimeField> Visitor<'_> for PolyVisitor<F> {
                 type Value = DensePolyPrimeField<F>;
 
                 fn expecting(&self, f: &mut Formatter<'_>) -> FmtResult {

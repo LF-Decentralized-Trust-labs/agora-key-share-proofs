@@ -92,7 +92,7 @@ impl EncryptionKeys {
         block_id: u64,
     ) -> HotStorageProof {
         let params = PedersenCommitmentParams::default();
-        let (comm_ped, r) = params.commit_random(encrypted_share, &mut rand::rngs::OsRng);
+        let (comm_ped, r) = params.commit_random(encrypted_share, rand::rngs::OsRng);
         let s1 = Scalar::random(&mut rand::rngs::OsRng);
         let s2 = Scalar::random(&mut rand::rngs::OsRng);
         let a_comm_ped = params.commit(s1, s2);

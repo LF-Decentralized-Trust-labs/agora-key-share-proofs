@@ -9,6 +9,7 @@ dependencies = [
  "ark-poly",
  "blsful",
  "blstrs_plus",
+ "crypto-bigint",
  "hex",
  "itertools 0.13.0",
  "maplit",
