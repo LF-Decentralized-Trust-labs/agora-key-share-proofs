@@ -167,22 +167,9 @@ impl KZG10CommonReferenceParams {
         let domain =
             GeneralEvaluationDomain::<Scalar>::new(domain_size).expect("Failed to create domain");
         let proofs = domain.fft(&h_coms);
-        // sanity check 1
+        // sanity check
         let omega = get_omega(domain_size);
         assert_eq!(domain.group_gen(), omega);
-        // sanity check 2
-        // FFT(h_coms) is evaluation in the exponent at powers of omega
-        // (additive notation: \sum_j (w^i)^j h_{j+1} )
-        // for i in 0..domain_size {
-        //     let mut sum = G1Projective::IDENTITY;
-        //     let eval_point = &omega.pow_vartime([i as u64]);
-        //     for j in 0..h_coms.len() - 1 {
-        //         sum += h_coms[j + 1] * eval_point.pow_vartime([j as u64]);
-        //     }
-        //     dbg!(i);
-        //     // TODO fails
-        //     // assert_eq!(proofs[i], sum);
-        // }
         proofs[..n + 1].to_vec()
     }
 
@@ -260,7 +247,7 @@ mod tests {
         let fx = DensePolyPrimeField((0..10).map(|_| Scalar::random(&mut rng)).collect());
         let m = fx.degree();
 
-        let mut h_coms = crs.get_fk_hcoms(&fx);
+        let h_coms = crs.get_fk_hcoms(&fx);
         let mut h_polys = Vec::with_capacity(m);
         let mut h_evals = Vec::with_capacity(m);
         for i in 1..=m {
@@ -289,11 +276,11 @@ mod tests {
     fn test_zero_open() {
         let mut rng = rand_chacha::ChaCha12Rng::from_seed([0u8; 32]);
         let crs = KZG10CommonReferenceParams::setup(NonZeroUsize::new(10).unwrap(), &mut rng);
-        let poly = DensePolyPrimeField((0..10).map(|_| Scalar::random(&mut rng)).collect());
+        let mut poly = DensePolyPrimeField((0..10).map(|_| Scalar::random(&mut rng)).collect());
+        poly.0[0] = Scalar::ZERO;
         let commitment = crs.commit_g1(&poly);
 
-        // challenge is omega^0 (aka 1)
-        let challenge = Scalar::ONE;
+        let challenge = Scalar::ZERO;
         let proof = crs.open(&poly, challenge);
         let y = poly.evaluate(&challenge);
         assert!(crs.verify(&commitment, challenge, y, &proof).is_ok());

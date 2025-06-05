@@ -658,7 +658,7 @@ mod tests {
         // let my_num =
         //     DensePolyPrimeField(vec![-Scalar::ONE, -Scalar::ONE, Scalar::ONE, Scalar::ONE]);
         let my_den = DensePolyPrimeField(vec![-Scalar::ONE, Scalar::ONE]);
-        let (my_quo, my_rem) = my_num.poly_mod(&my_den);
+        let (_, my_rem) = my_num.poly_mod(&my_den);
         let mut my_rem_trim = my_rem.clone();
         my_rem_trim.trim();
         assert!(my_rem_trim.is_zero());

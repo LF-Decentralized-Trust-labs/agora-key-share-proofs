@@ -217,7 +217,8 @@ mod tests {
         let sk = SigningKey(Scalar::random(&mut rng));
         let threshold = 2;
         let num_shares = 3;
-        let omega = get_omega((num_shares + 1).next_power_of_two());
+        let root_degree: usize = num_shares + 1;
+        let omega = get_omega(root_degree.next_power_of_two());
         let shares = sk
             .create_shares(threshold, num_shares, omega, &mut rng)
             .unwrap();
@@ -240,7 +241,7 @@ mod tests {
         assert!(payloads_res.is_ok());
 
         let payloads = payloads_res.unwrap();
-        for (i, payload) in payloads.iter().enumerate() {
+        for payload in payloads.iter() {
             let eval_point = omega.pow_vartime([payload.share_id as u64]);
             assert!(crs
                 .verify(
