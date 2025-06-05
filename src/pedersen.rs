@@ -21,7 +21,7 @@ impl Default for PedersenCommitmentParams {
             b"BLS12381G1_XMD:SHA-256_SSWU_RO_",
         );
         Self {
-            g: G1Projective::default(),
+            g: G1Projective::GENERATOR,
             h,
         }
     }

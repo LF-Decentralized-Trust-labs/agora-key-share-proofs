@@ -32,6 +32,7 @@ impl SigningKey {
         &self,
         threshold: usize,
         num_shares: usize,
+        omega: Scalar,
         mut rng: impl RngCore + CryptoRng,
     ) -> KeyShareProofResult<(Vec<SigningKeyShare>, DensePolyPrimeField<Scalar>)> {
         if threshold > num_shares {
@@ -48,10 +49,9 @@ impl SigningKey {
         let mut polynomial = DensePolyPrimeField::random(threshold - 1, &mut rng);
         polynomial.0[0] = self.0;
         for (i, share) in shares.iter_mut().enumerate() {
-            // i+2 because verification fails when challenge = 1 (TODO why?)
-            let challenge = Scalar::from((i + 2) as u64);
+            share.id = i + 1;
+            let challenge = omega.pow_vartime([share.id as u64]);
             let sc = polynomial.evaluate(&challenge);
-            share.id = challenge;
             share.share = sc;
             share.threshold = threshold as u16;
         }
@@ -60,7 +60,7 @@ impl SigningKey {
     }
 
     /// Reconstruct the signing key from the shares
-    pub fn from_shares(shares: &[SigningKeyShare]) -> KeyShareProofResult<Self> {
+    pub fn from_shares(shares: &[SigningKeyShare], omega: Scalar) -> KeyShareProofResult<Self> {
         if shares.len() < 2 {
             return Err(KeyShareProofError::General(
                 "At least 2 shares are required".to_string(),
@@ -76,16 +76,19 @@ impl SigningKey {
                 "Shares must have unique indices".to_string(),
             ));
         }
-        if shares.iter().any(|s| s.id.is_zero().unwrap_u8() == 1) {
+        if shares.iter().any(|s| s.id == 0) {
             return Err(KeyShareProofError::General(
                 "Shares must have indices greater than 0".to_string(),
             ));
         }
-        let shares = shares.iter().map(|s| (s.id, s.share)).collect_vec();
-        let identifiers = shares.iter().map(|&s| s.0).collect_vec();
-        let key = shares
+        let challenges = shares
             .iter()
-            .map(|&(i, s)| lagrange(i, identifiers.as_slice()) * s)
+            .map(|&s| omega.pow_vartime([s.id as u64]))
+            .collect_vec();
+        let key = challenges
+            .iter()
+            .zip(shares.iter())
+            .map(|(x, s)| lagrange(*x, challenges.as_slice()) * s.share)
             .sum();
 
         Ok(Self(key))
@@ -95,12 +98,13 @@ impl SigningKey {
     pub fn generate_register_payloads<W: AsRef<[EncryptionKeys]>>(
         &self,
         threshold: usize,
+        omega: Scalar,
         crs: &KZG10CommonReferenceParams,
         mut rng: impl RngCore + CryptoRng,
         hot_wallet_encryption_keys: W,
     ) -> KeyShareProofResult<Vec<ClientRegisterPayload>> {
         let encryption_keys = hot_wallet_encryption_keys.as_ref();
-        let (shares, _) = self.create_shares(threshold, encryption_keys.len(), &mut rng)?;
+        let (shares, _) = self.create_shares(threshold, encryption_keys.len(), omega, &mut rng)?;
         let share_ids = shares.iter().map(|share| share.id).collect::<Vec<_>>();
         let mut register_payloads = vec![ClientRegisterPayload::default(); shares.len()];
 
@@ -116,25 +120,26 @@ impl SigningKey {
             })
             .collect::<Vec<_>>();
 
-        let interpolated_poly = Self::interpolate_poly(&share_ids.as_slice(), &encrypted_shares);
+        let challenges = share_ids
+            .iter()
+            .map(|i| omega.pow_vartime([*i as u64]))
+            .collect::<Vec<_>>();
+        let interpolated_poly = Self::interpolate_poly(&challenges.as_slice(), &encrypted_shares);
         // Interpolated polynomial degree should be low enough for kzg
-        assert!(interpolated_poly.degree() <= crs.powers_of_g.len());
+        assert!(interpolated_poly.degree() + 1 <= crs.powers_of_g.len());
+        let commitment = crs.commit_g1(&interpolated_poly);
 
-        // let opening_proofs = crs.batch_open(&interpolated_poly, &encrypted_shares);
-        let opening_proofs = crs.batch_open(&interpolated_poly, share_ids.len());
+        let mut opening_proofs = crs.batch_open(&interpolated_poly, share_ids.len());
+        // we remove the first opening proof since it's for an opening at id = 0 (the secret)
+        // this way the indices line up with share_ids and encrypted_shares
+        opening_proofs.remove(0);
 
         for (i, payload) in register_payloads.iter_mut().enumerate() {
-            // payload.share_id = domain.element(i);
             payload.share_id = share_ids[i];
             payload.encrypted_share = encrypted_shares[i];
             payload.verification_share = G2Projective::GENERATOR * shares[i].share;
             payload.proof = opening_proofs[i];
-            // TODO this seems wrong??
-            // payload.commitment = crs.commit_g1(&DensePolyPrimeField(vec![
-            //     -encrypted_shares[i],
-            //     Scalar::ONE,
-            // ]));
-            payload.commitment = crs.commit_g1(&interpolated_poly);
+            payload.commitment = commitment;
         }
 
         Ok(register_payloads)
@@ -180,7 +185,7 @@ impl SigningKey {
 /// A share of the signing key
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub struct SigningKeyShare {
-    pub(crate) id: Scalar,
+    pub(crate) id: usize,
     pub(crate) share: Scalar,
     pub(crate) threshold: u16,
 }
@@ -201,7 +206,7 @@ fn lagrange(id: Scalar, others: &[Scalar]) -> Scalar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DecryptionKeys;
+    use crate::{utils::get_omega, DecryptionKeys};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::num::NonZeroUsize;
@@ -212,11 +217,15 @@ mod tests {
         let sk = SigningKey(Scalar::random(&mut rng));
         let threshold = 2;
         let num_shares = 3;
-        let shares = sk.create_shares(threshold, num_shares, &mut rng).unwrap();
-        let reconstructed = SigningKey::from_shares(&shares.0).unwrap();
+        let omega = get_omega((num_shares + 1).next_power_of_two());
+        let shares = sk
+            .create_shares(threshold, num_shares, omega, &mut rng)
+            .unwrap();
+        let reconstructed = SigningKey::from_shares(&shares.0, omega).unwrap();
         assert_eq!(sk, reconstructed);
 
-        let crs = KZG10CommonReferenceParams::setup(NonZeroUsize::new(4).unwrap(), &mut rng);
+        let crs =
+            KZG10CommonReferenceParams::setup(NonZeroUsize::new(num_shares - 1).unwrap(), &mut rng);
 
         let dks_set = (0..num_shares)
             .map(|_| DecryptionKeys::random(&mut rng))
@@ -226,15 +235,17 @@ mod tests {
             .map(|dk| EncryptionKeys::from(dk))
             .collect::<Vec<_>>();
 
-        let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
+        let payloads_res =
+            sk.generate_register_payloads(threshold, omega, &crs, &mut rng, &eks_set);
         assert!(payloads_res.is_ok());
 
         let payloads = payloads_res.unwrap();
         for (i, payload) in payloads.iter().enumerate() {
+            let eval_point = omega.pow_vartime([payload.share_id as u64]);
             assert!(crs
                 .verify(
                     &payload.commitment,
-                    payload.share_id,
+                    eval_point,
                     payload.encrypted_share,
                     &payload.proof
                 )
@@ -248,11 +259,9 @@ mod tests {
         let sk = SigningKey(Scalar::random(&mut rng));
         let threshold = 2;
         let num_shares = 3;
-        let shares = sk.create_shares(threshold, num_shares, &mut rng).unwrap();
-        let reconstructed = SigningKey::from_shares(&shares.0).unwrap();
-        assert_eq!(sk, reconstructed);
-
-        let crs = KZG10CommonReferenceParams::setup(NonZeroUsize::new(4).unwrap(), &mut rng);
+        let crs =
+            KZG10CommonReferenceParams::setup(NonZeroUsize::new(num_shares - 1).unwrap(), &mut rng);
+        let omega = get_omega((num_shares + 1).next_power_of_two());
 
         let dks_set = (0..3)
             .map(|_| DecryptionKeys::random(&mut rng))
@@ -262,14 +271,26 @@ mod tests {
             .map(|dk| EncryptionKeys::from(dk))
             .collect::<Vec<_>>();
 
-        let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
-        assert!(payloads_res.is_ok());
-
+        let payloads_res =
+            sk.generate_register_payloads(threshold, omega, &crs, &mut rng, &eks_set);
         let payloads = payloads_res.unwrap();
 
         for (payload, eks) in payloads.iter().zip(eks_set.iter()) {
-            let hot_proof = eks.prove(&crs, payload.encrypted_share, payload.commitment, 0);
-            let _ = hot_proof.verify(&crs, 0);
+            let hot_proof = eks.prove(
+                &crs,
+                omega.pow_vartime([payload.share_id as u64]),
+                payload.encrypted_share,
+                payload.proof,
+                0,
+            );
+            assert!(hot_proof
+                .verify(
+                    &crs,
+                    &payload.commitment,
+                    omega.pow_vartime([payload.share_id as u64]),
+                    0
+                )
+                .is_ok());
         }
     }
 }

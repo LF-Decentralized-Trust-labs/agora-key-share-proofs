@@ -46,7 +46,7 @@ impl KZG10CommonReferenceParams {
 
     /// Commit to a polynomial in the G1 group
     pub fn commit_g1(&self, polynomial: &DensePolyPrimeField<Scalar>) -> G1Projective {
-        if polynomial.degree() > self.powers_of_g.len() {
+        if polynomial.degree() + 1 > self.powers_of_g.len() {
             panic!("Polynomial degree is too high for the CRS");
         }
         // Allow for smaller polynomials
@@ -73,7 +73,8 @@ impl KZG10CommonReferenceParams {
     }
 
     /// Get all commitments to the H_i(X) polynomials in Feist-Khovratovich
-    /// code based on https://github.com/alinush/libpolycrypto/blob/fk/libpolycrypto/src/KatePublicParameters.cpp#L199
+    /// for i = 0, ..., m-1 where m is the degree of fx
+    /// (code based on https://github.com/alinush/libpolycrypto/blob/fk/libpolycrypto/src/KatePublicParameters.cpp#L199)
     pub fn get_fk_hcoms(&self, fx: &DensePolyPrimeField<Scalar>) -> Vec<G1Projective> {
         let m = fx.degree();
         let big_m = m.next_power_of_two();
@@ -139,8 +140,9 @@ impl KZG10CommonReferenceParams {
     }
 
     /// Batch open polynomial evaluations in the G1 group using Feist-Khovratovich
+    /// Returns n+1 opening proofs at roots of unity (at omega^0, ..., omega^n)
     pub fn batch_open(&self, fx: &DensePolyPrimeField<Scalar>, n: usize) -> Vec<G1Projective> {
-        let domain_size = n.next_power_of_two();
+        let domain_size = (n + 1).next_power_of_two();
         let m = fx.degree();
         let mut h_coms = self.get_fk_hcoms(fx);
         h_coms.resize(domain_size, G1Projective::IDENTITY);
@@ -181,7 +183,7 @@ impl KZG10CommonReferenceParams {
         //     // TODO fails
         //     // assert_eq!(proofs[i], sum);
         // }
-        proofs
+        proofs[..n + 1].to_vec()
     }
 
     /// Get quotient polynomials

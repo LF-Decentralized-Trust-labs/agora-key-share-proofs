@@ -1,4 +1,5 @@
 use crate::client::VerificationKey;
+use crate::get_omega;
 use crate::{encrypt::*, SigningKey};
 use crate::{
     // DensePolyPrimeField,
@@ -87,11 +88,14 @@ impl EncryptionKeys {
     pub fn prove(
         &self,
         crs: &KZG10CommonReferenceParams,
+        share_eval_pt: Scalar,
         encrypted_share: Scalar,
         current_opening: G1Projective,
         block_id: u64,
     ) -> HotStorageProof {
         let params = PedersenCommitmentParams::default();
+        // hot proof correctness relies on KZG and Pedersen generator to be the same
+        assert_eq!(params.g, crs.powers_of_g[0]);
         let (comm_ped, r) = params.commit_random(encrypted_share, rand::rngs::OsRng);
         let s1 = Scalar::random(&mut rand::rngs::OsRng);
         let s2 = Scalar::random(&mut rand::rngs::OsRng);
@@ -104,8 +108,8 @@ impl EncryptionKeys {
         let t2 = s2 + c * r;
         let si = Scalar::random(&mut rand::rngs::OsRng);
         let blinded_proof = current_opening + params.h * si;
-        let shift_proof =
-            G2Projective::GENERATOR * -r + (crs.powers_of_h[1] - crs.powers_of_h[0]) * -si; // TODO crs.powers_of_h[0] should be multiplied by party index i
+        let shift_proof = G2Projective::GENERATOR * -r
+            + (crs.powers_of_h[1] - (crs.powers_of_h[0] * share_eval_pt)) * -si;
         HotStorageProof {
             comm_ped,
             a_comm_ped,
@@ -113,7 +117,6 @@ impl EncryptionKeys {
             t2,
             blinded_proof,
             shift_proof,
-            current_opening,
         }
     }
 }
@@ -213,8 +216,6 @@ pub struct HotStorageProof {
     pub blinded_proof: G1Projective,
     /// The shift proof
     pub shift_proof: G2Projective,
-    /// The current opening proof
-    pub current_opening: G1Projective,
 }
 
 impl HotStorageProof {
@@ -222,18 +223,21 @@ impl HotStorageProof {
     pub fn verify(
         &self,
         crs: &KZG10CommonReferenceParams,
+        current_commitment: &G1Projective,
+        share_eval_pt: Scalar,
         block_id: u64,
     ) -> KeyShareProofResult<()> {
         let params = PedersenCommitmentParams::default();
         let args = [
             (
-                (self.current_opening - self.comm_ped).to_affine(),
+                (current_commitment - self.comm_ped).to_affine(),
                 G2Prepared::from(-crs.powers_of_h[0].to_affine()),
             ),
             (
                 self.blinded_proof.to_affine(),
-                // TODO raise powers_of_h[0] to i
-                G2Prepared::from((crs.powers_of_h[1] - crs.powers_of_h[0]).to_affine()),
+                G2Prepared::from(
+                    (crs.powers_of_h[1] - (crs.powers_of_h[0] * share_eval_pt)).to_affine(),
+                ),
             ),
             (
                 params.h.to_affine(),
@@ -268,7 +272,7 @@ impl HotStorageProof {
 #[derive(Debug, Copy, Clone, Deserialize, Serialize, Default)]
 pub struct ClientRegisterPayload {
     /// The share index
-    pub share_id: Scalar,
+    pub share_id: usize,
     /// The encrypted share
     pub encrypted_share: Scalar,
     /// The verification share
@@ -283,12 +287,14 @@ impl ClientRegisterPayload {
     pub fn refresh(
         &self,
         refresh_payload: &ClientRefreshPayload,
-        share_id: Scalar,
+        share_id: usize,
         crs: &KZG10CommonReferenceParams,
     ) -> KeyShareProofResult<ClientRegisterPayload> {
+        let omega = get_omega(crs.powers_of_g.len());
+        let eval_point = omega.pow_vartime([self.share_id as u64]);
         crs.verify(
             &refresh_payload.commitment,
-            share_id,
+            eval_point,
             refresh_payload.zero_share,
             &refresh_payload.proof,
         )?;
@@ -307,7 +313,7 @@ impl ClientRegisterPayload {
 #[derive(Debug, Copy, Clone, Deserialize, Serialize, Default)]
 pub struct ClientRefreshPayload {
     /// The share index
-    pub share_id: Scalar,
+    pub share_id: usize,
     /// The zero share
     pub zero_share: Scalar,
     /// The KZG commitment to the zero polynomial
@@ -321,24 +327,21 @@ pub struct ClientRefreshPayload {
 pub fn generate_refresh_payloads(
     threshold: usize,
     num_shares: usize,
+    omega: Scalar,
     crs: &KZG10CommonReferenceParams,
     mut rng: impl RngCore + CryptoRng,
 ) -> KeyShareProofResult<Vec<ClientRefreshPayload>> {
     let zero = SigningKey(Scalar::ZERO);
-    let (zero_shares, zero_poly) = zero.create_shares(threshold, num_shares, &mut rng)?;
-    let challenges = zero_shares
-        .iter()
-        // i+2 because verification fails when challenge = 1 (TODO why?)
-        .map(|share| share.id)
-        .collect::<Vec<_>>();
-    let opening_proofs = crs.batch_open(&zero_poly, challenges.len());
-    let zero_proof = crs.open(&zero_poly, Scalar::ZERO);
+    let (zero_shares, zero_poly) = zero.create_shares(threshold, num_shares, omega, &mut rng)?;
+    let opening_proofs = crs.batch_open(&zero_poly, zero_shares.len());
+    // open at omega^0 = 1
+    let zero_proof = crs.open(&zero_poly, Scalar::ONE);
 
     let mut refresh_payloads = vec![ClientRefreshPayload::default(); zero_shares.len()];
 
     // TODO also return dcom
     for (i, payload) in refresh_payloads.iter_mut().enumerate() {
-        payload.share_id = challenges[i];
+        payload.share_id = zero_shares[i].id;
         payload.zero_share = zero_shares[i].share;
         payload.proof = opening_proofs[i];
         // payload.verification_share = G2Projective::GENERATOR * shares[i].share;
@@ -352,7 +355,7 @@ pub fn generate_refresh_payloads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+    use crate::get_omega;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::num::NonZeroUsize;
@@ -367,24 +370,22 @@ mod tests {
             NonZeroUsize::new(num_parties - 1).unwrap(),
             &mut rng,
         );
-        let domain_size = num_parties.next_power_of_two();
-        let share_ids =
-            GeneralEvaluationDomain::<Scalar>::new(domain_size).expect("Failed to create domain");
+        let omega = get_omega(num_parties);
 
         // get refresh information
-        let refresh_payloads_res = generate_refresh_payloads(threshold, num_parties, &crs, rng);
+        let refresh_payloads_res =
+            generate_refresh_payloads(threshold, num_parties, omega, &crs, rng);
         assert!(refresh_payloads_res.is_ok());
 
         let refresh_payloads = refresh_payloads_res.unwrap();
 
         // every party verifies its zero share
         for (i, payload) in refresh_payloads.iter().enumerate() {
+            let eval_point = omega.pow_vartime([payload.share_id as u64]);
             assert!(crs
                 .verify(
                     &payload.commitment,
-                    // share_ids.element(i + 1),
-                    // Scalar::from((i + 1) as u64),
-                    payload.share_id,
+                    eval_point,
                     payload.zero_share,
                     &payload.proof
                 )
