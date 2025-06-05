@@ -322,8 +322,33 @@ pub struct ClientRefreshPayload {
     pub proof: G1Projective,
 }
 /// Generate shares of zero to refresh hot key shares
-/// Returns refresh payload for each client, plus commitment, dcom, and opening at zero
+/// Returns refresh payload for each client, plus commitment to refresh polynomial
 pub fn generate_refresh_payloads(
+    threshold: usize,
+    num_shares: usize,
+    omega: Scalar,
+    crs: &KZG10CommonReferenceParams,
+    mut rng: impl RngCore + CryptoRng,
+) -> KeyShareProofResult<(Vec<ClientRefreshPayload>, G1Projective)> {
+    let zero = SigningKey(Scalar::ZERO);
+    let (ref_shares, zero_poly) = zero.create_shares(threshold, num_shares, omega, &mut rng)?;
+    let commitment = crs.commit_g1(&zero_poly);
+    let mut opening_proofs = crs.batch_open(&zero_poly, ref_shares.len());
+
+    let mut refresh_payloads = vec![ClientRefreshPayload::default(); ref_shares.len()];
+    for (i, payload) in refresh_payloads.iter_mut().enumerate() {
+        payload.share_id = ref_shares[i].id;
+        payload.share = ref_shares[i].share;
+        payload.proof = opening_proofs[i];
+        // payload.verification_share = G2Projective::GENERATOR * shares[i].share;
+    }
+
+    Ok((refresh_payloads, commitment))
+}
+/// Generate shares of zero to refresh hot key shares with additional components
+/// to independently verify correctness
+/// Additionally returns commitment, dcom, and opening at zero
+pub fn generate_refresh_payloads_untrusted(
     threshold: usize,
     num_shares: usize,
     omega: Scalar,
@@ -368,8 +393,8 @@ mod tests {
     #[test]
     fn test_refresh() {
         let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
-        let threshold = 2;
-        let num_parties = 3;
+        let threshold = 3;
+        let num_parties = 5;
         let crs = KZG10CommonReferenceParams::setup(
             NonZeroUsize::new(num_parties - 1).unwrap(),
             &mut rng,
@@ -391,6 +416,43 @@ mod tests {
         // get refresh information
         let refresh_payloads_res =
             generate_refresh_payloads(threshold, num_parties, omega, &crs, rng);
+        assert!(refresh_payloads_res.is_ok());
+        let (refresh_payloads, refresh_commitment) = refresh_payloads_res.unwrap();
+
+        // refresh the shares
+        for (payload, refresh_payload) in payloads.iter().zip(refresh_payloads.iter()) {
+            assert!(payload
+                .refresh(&refresh_commitment, refresh_payload, omega, &crs)
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn test_refresh_untrusted() {
+        let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
+        let threshold = 2;
+        let num_parties = 3;
+        let crs = KZG10CommonReferenceParams::setup_extended(
+            NonZeroUsize::new(num_parties - 1).unwrap(),
+            &mut rng,
+        );
+        let omega = get_omega((num_parties + 1).next_power_of_two());
+
+        let sk = SigningKey(Scalar::random(&mut rng));
+        let dks_set = (0..num_parties)
+            .map(|_| DecryptionKeys::random(&mut rng))
+            .collect::<Vec<_>>();
+        let eks_set = dks_set
+            .iter()
+            .map(|dk| EncryptionKeys::from(dk))
+            .collect::<Vec<_>>();
+        let payloads_res =
+            sk.generate_register_payloads(threshold, omega, &crs, &mut rng, &eks_set);
+        let payloads = payloads_res.unwrap();
+
+        // get refresh information
+        let refresh_payloads_res =
+            generate_refresh_payloads_untrusted(threshold, num_parties, omega, &crs, rng);
         assert!(refresh_payloads_res.is_ok());
         let (refresh_payloads, (refresh_commitment, dcom, zero_opening)) =
             refresh_payloads_res.unwrap();

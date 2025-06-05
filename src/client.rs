@@ -130,9 +130,6 @@ impl SigningKey {
         let commitment = crs.commit_g1(&interpolated_poly);
 
         let mut opening_proofs = crs.batch_open(&interpolated_poly, share_ids.len());
-        // we remove the first opening proof since it's for an opening at id = 0 (the secret)
-        // this way the indices line up with share_ids and encrypted_shares
-        opening_proofs.remove(0);
 
         for (i, payload) in register_payloads.iter_mut().enumerate() {
             payload.share_id = share_ids[i];

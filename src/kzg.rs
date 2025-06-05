@@ -12,7 +12,7 @@ pub struct KZG10CommonReferenceParams {
     /// The powers of tau in the G1 group
     pub powers_of_g: Vec<G1Projective>,
     /// The powers of tau in the G2 group
-    pub powers_of_h: [G2Projective; 2],
+    pub powers_of_h: Vec<G2Projective>,
 }
 
 impl KZG10CommonReferenceParams {
@@ -30,12 +30,41 @@ impl KZG10CommonReferenceParams {
         powers_of_g.push(G1Projective::GENERATOR);
         powers_of_g.push(G1Projective::GENERATOR * tau);
 
-        let powers_of_h = [G2Projective::GENERATOR, G2Projective::GENERATOR * tau];
+        let powers_of_h = vec![G2Projective::GENERATOR, G2Projective::GENERATOR * tau];
 
         for i in 2..max_degree + 1 {
             let power_beta = powers_of_tau[i - 1] * tau;
             powers_of_tau.push(power_beta);
             powers_of_g.push(G1Projective::GENERATOR * power_beta);
+        }
+
+        Self {
+            powers_of_g,
+            powers_of_h,
+        }
+    }
+    /// Setup with additional powers of tau in G2
+    pub fn setup_extended(max_degree: NonZeroUsize, rng: impl RngCore + CryptoRng) -> Self {
+        let max_degree = max_degree.get();
+        let tau = Scalar::random(rng);
+
+        let mut powers_of_g = Vec::with_capacity(max_degree + 1);
+        let mut powers_of_h = Vec::with_capacity(max_degree + 1);
+
+        let mut powers_of_tau = Vec::with_capacity(max_degree + 1);
+        powers_of_tau.push(Scalar::ONE);
+        powers_of_tau.push(tau);
+
+        powers_of_g.push(G1Projective::GENERATOR);
+        powers_of_g.push(G1Projective::GENERATOR * tau);
+        powers_of_h.push(G2Projective::GENERATOR);
+        powers_of_h.push(G2Projective::GENERATOR * tau);
+
+        for i in 2..max_degree + 1 {
+            let power_beta = powers_of_tau[i - 1] * tau;
+            powers_of_tau.push(power_beta);
+            powers_of_g.push(G1Projective::GENERATOR * power_beta);
+            powers_of_h.push(G2Projective::GENERATOR * power_beta);
         }
 
         Self {
@@ -140,7 +169,7 @@ impl KZG10CommonReferenceParams {
     }
 
     /// Batch open polynomial evaluations in the G1 group using Feist-Khovratovich
-    /// Returns n+1 opening proofs at roots of unity (at omega^0, ..., omega^n)
+    /// Returns n opening proofs at roots of unity (at omega^1, ..., omega^n)
     pub fn batch_open(&self, fx: &DensePolyPrimeField<Scalar>, n: usize) -> Vec<G1Projective> {
         let domain_size = (n + 1).next_power_of_two();
         let m = fx.degree();
@@ -170,7 +199,7 @@ impl KZG10CommonReferenceParams {
         // sanity check
         let omega = get_omega(domain_size);
         assert_eq!(domain.group_gen(), omega);
-        proofs[..n + 1].to_vec()
+        proofs[1..=n].to_vec()
     }
 
     /// Get quotient polynomials
@@ -297,10 +326,10 @@ mod tests {
         assert_eq!(poly.degree(), degree);
         let commitment = crs.commit_g1(&poly);
 
-        // note these start with the zero opening (at omega^0)
         let opening_proofs = crs.batch_open(&poly, num_parties + 1);
+        // note these start with the zero opening (at omega^0)
         let challenges = roots_of_unity((num_parties + 1).next_power_of_two());
-        for (challenge, proof) in challenges.iter().zip(opening_proofs.iter()) {
+        for (challenge, proof) in challenges[1..].iter().zip(opening_proofs.iter()) {
             // check that all the batch-opened proofs verify
             assert!(crs
                 .verify(&commitment, *challenge, poly.evaluate(challenge), proof)
