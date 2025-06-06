@@ -4,7 +4,7 @@ use agora_key_share_proofs::{
     generate_refresh_payloads, DecryptionKeys, EncryptionKeys, KZG10CommonReferenceParams,
     Signature, SigningKey, VerificationKey,
 };
-use blsful::inner_types::{Field, G2Projective, Scalar};
+use blsful::inner_types::{Field, Scalar};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::{num::NonZeroUsize, time::Duration};
@@ -95,7 +95,6 @@ fn main() {
 
     /***** Setup system parameters *****/
     let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
-    // let crs = KZG10CommonReferenceParams::setup(NonZeroUsize::new(num_parties + 1).unwrap(), &mut rng);
     let crs =
         KZG10CommonReferenceParams::setup(NonZeroUsize::new(num_parties - 1).unwrap(), &mut rng);
 
@@ -126,8 +125,10 @@ fn main() {
     let start = Instant::now();
     for _ in 0..samples {
         let sk = SigningKey(Scalar::random(&mut rng));
-        let shares = sk.create_shares(threshold, num_parties, &mut rng).unwrap();
-        let reconstructed = SigningKey::from_shares(&shares.0).unwrap();
+        let shares = sk
+            .create_shares(threshold, num_parties, &crs, &mut rng)
+            .unwrap();
+        let reconstructed = SigningKey::from_shares(&shares.0, &crs).unwrap();
         assert_eq!(sk, reconstructed);
 
         let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
@@ -146,7 +147,9 @@ fn main() {
     // generate vk, hot/cold shares to use for the next benchmarks
     let sk = SigningKey(Scalar::random(&mut rng));
     let vk = VerificationKey::from(&sk);
-    let _ = sk.create_shares(threshold, num_parties, &mut rng).unwrap();
+    let _ = sk
+        .create_shares(threshold, num_parties, &crs, &mut rng)
+        .unwrap();
     let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
     let hot_shares = payloads_res.unwrap();
 
@@ -170,7 +173,7 @@ fn main() {
     // let hot_sig_time = start.elapsed();
     // println!("done in {:?}", hot_sig_time);
 
-    let tsigs = hot_sigs
+    let _ = hot_sigs
         .iter()
         .zip(cold_sigs.iter())
         .map(|(hot, cold)| Signature(hot.0 - cold.0))
@@ -191,26 +194,27 @@ fn main() {
     let start = Instant::now();
     // - client generates shares of zero
     let refresh_payload_res = generate_refresh_payloads(threshold, num_parties, &crs, rng);
-    let refresh_payloads = refresh_payload_res.unwrap();
-    // - verify the public parts of the update proof (opening at 0 and degree)
-    // TODO
+    let (refresh_payloads, refresh_commitment) = refresh_payload_res.unwrap();
     let client_ref_time = start.elapsed();
+    println!("done");
 
     let start = Instant::now();
     // - hot parties update their key shares
-    for (i, (hot_share, refresh_payload)) in
-        hot_shares.iter().zip(refresh_payloads.iter()).enumerate()
-    {
-        let refresh_res = hot_share.refresh(&refresh_payload, Scalar::from((i + 1) as u64), &crs);
-        // assert!(refresh_res.is_ok()); // TODO this fails :(
+    for (hot_share, refresh_payload) in hot_shares.iter().zip(refresh_payloads.iter()) {
+        let refresh_res = hot_share.refresh(&refresh_commitment, refresh_payload, &crs);
+        assert!(refresh_res.is_ok());
     }
     let hot_ref_time = start.elapsed();
     println!("done");
 
     println!("time for client refresh: {:?}", client_ref_time);
+    writeln!(file, "refresh (client):\t{:?}", client_ref_time).unwrap_or_else(|err| {
+        eprintln!("Problem writing client refresh time to file: {err}");
+        process::exit(1);
+    });
     let hot_ref_avg = hot_ref_time / num_parties as u32;
     println!("average time per hot refresh: {:?}", hot_ref_avg);
-    writeln!(file, "tsig:\t\t\t\t{:?}", hot_ref_avg).unwrap_or_else(|err| {
+    writeln!(file, "refresh (hot):\t\t{:?}", hot_ref_avg).unwrap_or_else(|err| {
         eprintln!("Problem writing hot refresh avg to file: {err}");
         process::exit(1);
     });
@@ -249,10 +253,23 @@ fn main() {
     let mut hot_vrfy_time = Duration::new(0, 0);
     for (hot_share, eks) in hot_shares.iter().zip(eks_set.iter()) {
         let start = Instant::now();
-        let hot_proof = eks.prove(&crs, hot_share.encrypted_share, hot_share.commitment, 0);
+        let hot_proof = eks.prove(
+            &crs,
+            crs.omega.pow_vartime([hot_share.share_id as u64]),
+            hot_share.encrypted_share,
+            hot_share.proof,
+            0,
+        );
         hot_prove_time += start.elapsed();
         let start = Instant::now();
-        let _ = hot_proof.verify(&crs, 0);
+        assert!(hot_proof
+            .verify(
+                &crs,
+                &hot_share.commitment,
+                crs.omega.pow_vartime([hot_share.share_id as u64]),
+                0,
+            )
+            .is_ok());
         hot_vrfy_time += start.elapsed();
     }
     println!("done");

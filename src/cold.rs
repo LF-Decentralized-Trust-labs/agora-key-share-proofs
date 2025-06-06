@@ -287,11 +287,10 @@ impl ClientRegisterPayload {
         &self,
         refresh_commitment: &G1Projective,
         refresh_payload: &ClientRefreshPayload,
-        omega: Scalar,
         crs: &KZG10CommonReferenceParams,
     ) -> KeyShareProofResult<ClientRegisterPayload> {
         // use *current* share to determine eval point
-        let eval_point = omega.pow_vartime([self.share_id as u64]);
+        let eval_point = crs.omega.pow_vartime([self.share_id as u64]);
         // verify the refresh share
         crs.verify(
             &refresh_commitment,
@@ -326,14 +325,13 @@ pub struct ClientRefreshPayload {
 pub fn generate_refresh_payloads(
     threshold: usize,
     num_shares: usize,
-    omega: Scalar,
     crs: &KZG10CommonReferenceParams,
     mut rng: impl RngCore + CryptoRng,
 ) -> KeyShareProofResult<(Vec<ClientRefreshPayload>, G1Projective)> {
     let zero = SigningKey(Scalar::ZERO);
-    let (ref_shares, zero_poly) = zero.create_shares(threshold, num_shares, omega, &mut rng)?;
+    let (ref_shares, zero_poly) = zero.create_shares(threshold, num_shares, &crs, &mut rng)?;
     let commitment = crs.commit_g1(&zero_poly);
-    let mut opening_proofs = crs.batch_open(&zero_poly, ref_shares.len());
+    let opening_proofs = crs.batch_open(&zero_poly, ref_shares.len());
 
     let mut refresh_payloads = vec![ClientRefreshPayload::default(); ref_shares.len()];
     for (i, payload) in refresh_payloads.iter_mut().enumerate() {
@@ -351,7 +349,6 @@ pub fn generate_refresh_payloads(
 pub fn generate_refresh_payloads_untrusted(
     threshold: usize,
     num_shares: usize,
-    omega: Scalar,
     crs: &KZG10CommonReferenceParams,
     mut rng: impl RngCore + CryptoRng,
 ) -> KeyShareProofResult<(
@@ -359,7 +356,7 @@ pub fn generate_refresh_payloads_untrusted(
     (G1Projective, G1Projective, G1Projective),
 )> {
     let zero = SigningKey(Scalar::ZERO);
-    let (ref_shares, zero_poly) = zero.create_shares(threshold, num_shares, omega, &mut rng)?;
+    let (ref_shares, zero_poly) = zero.create_shares(threshold, num_shares, &crs, &mut rng)?;
     let commitment = crs.commit_g1(&zero_poly);
     let opening_proofs = crs.batch_open(&zero_poly, ref_shares.len());
     // open at zero
@@ -385,7 +382,6 @@ pub fn generate_refresh_payloads_untrusted(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::get_omega;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::num::NonZeroUsize;
@@ -399,7 +395,6 @@ mod tests {
             NonZeroUsize::new(num_parties - 1).unwrap(),
             &mut rng,
         );
-        let omega = get_omega((num_parties + 1).next_power_of_two());
 
         let sk = SigningKey(Scalar::random(&mut rng));
         let dks_set = (0..num_parties)
@@ -409,20 +404,18 @@ mod tests {
             .iter()
             .map(|dk| EncryptionKeys::from(dk))
             .collect::<Vec<_>>();
-        let payloads_res =
-            sk.generate_register_payloads(threshold, omega, &crs, &mut rng, &eks_set);
+        let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
         let payloads = payloads_res.unwrap();
 
         // get refresh information
-        let refresh_payloads_res =
-            generate_refresh_payloads(threshold, num_parties, omega, &crs, rng);
+        let refresh_payloads_res = generate_refresh_payloads(threshold, num_parties, &crs, rng);
         assert!(refresh_payloads_res.is_ok());
         let (refresh_payloads, refresh_commitment) = refresh_payloads_res.unwrap();
 
         // refresh the shares
         for (payload, refresh_payload) in payloads.iter().zip(refresh_payloads.iter()) {
             assert!(payload
-                .refresh(&refresh_commitment, refresh_payload, omega, &crs)
+                .refresh(&refresh_commitment, refresh_payload, &crs)
                 .is_ok());
         }
     }
@@ -436,7 +429,6 @@ mod tests {
             NonZeroUsize::new(num_parties - 1).unwrap(),
             &mut rng,
         );
-        let omega = get_omega((num_parties + 1).next_power_of_two());
 
         let sk = SigningKey(Scalar::random(&mut rng));
         let dks_set = (0..num_parties)
@@ -446,13 +438,12 @@ mod tests {
             .iter()
             .map(|dk| EncryptionKeys::from(dk))
             .collect::<Vec<_>>();
-        let payloads_res =
-            sk.generate_register_payloads(threshold, omega, &crs, &mut rng, &eks_set);
+        let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
         let payloads = payloads_res.unwrap();
 
         // get refresh information
         let refresh_payloads_res =
-            generate_refresh_payloads_untrusted(threshold, num_parties, omega, &crs, rng);
+            generate_refresh_payloads_untrusted(threshold, num_parties, &crs, rng);
         assert!(refresh_payloads_res.is_ok());
         let (refresh_payloads, (refresh_commitment, dcom, zero_opening)) =
             refresh_payloads_res.unwrap();
@@ -483,7 +474,7 @@ mod tests {
         // refresh the shares
         for (payload, refresh_payload) in payloads.iter().zip(refresh_payloads.iter()) {
             assert!(payload
-                .refresh(&refresh_commitment, refresh_payload, omega, &crs)
+                .refresh(&refresh_commitment, refresh_payload, &crs)
                 .is_ok());
         }
     }

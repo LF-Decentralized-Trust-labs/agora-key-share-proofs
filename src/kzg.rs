@@ -13,12 +13,15 @@ pub struct KZG10CommonReferenceParams {
     pub powers_of_g: Vec<G1Projective>,
     /// The powers of tau in the G2 group
     pub powers_of_h: Vec<G2Projective>,
+    /// Root of unity for polynomial evaluations
+    pub omega: Scalar,
 }
 
 impl KZG10CommonReferenceParams {
     /// Generate a common reference string for the KZG10 scheme
     pub fn setup(max_degree: NonZeroUsize, rng: impl RngCore + CryptoRng) -> Self {
         let max_degree = max_degree.get();
+        let omega = get_omega((max_degree + 1).next_power_of_two());
         let tau = Scalar::random(rng);
 
         let mut powers_of_g = Vec::with_capacity(max_degree + 1);
@@ -41,11 +44,13 @@ impl KZG10CommonReferenceParams {
         Self {
             powers_of_g,
             powers_of_h,
+            omega,
         }
     }
     /// Setup with additional powers of tau in G2
     pub fn setup_extended(max_degree: NonZeroUsize, rng: impl RngCore + CryptoRng) -> Self {
         let max_degree = max_degree.get();
+        let omega = get_omega((max_degree + 2).next_power_of_two());
         let tau = Scalar::random(rng);
 
         let mut powers_of_g = Vec::with_capacity(max_degree + 1);
@@ -70,6 +75,7 @@ impl KZG10CommonReferenceParams {
         Self {
             powers_of_g,
             powers_of_h,
+            omega,
         }
     }
 
