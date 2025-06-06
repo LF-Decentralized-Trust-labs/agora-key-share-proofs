@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn test_proofs_of_remembrance() {
+    fn test_hot_proof() {
         let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
         let sk = SigningKey(Scalar::random(&mut rng));
         let threshold = 2;

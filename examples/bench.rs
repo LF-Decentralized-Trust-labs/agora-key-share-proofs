@@ -291,7 +291,7 @@ fn main() {
             let cold_proof = dks.prove(0);
             cold_prove_time += start.elapsed();
             let start = Instant::now();
-            let _ = cold_proof.verify(eks);
+            let _ = cold_proof.verify(eks, 0);
             cold_vrfy_time += start.elapsed();
         }
     }

@@ -181,16 +181,25 @@ pub struct ColdStorageProof {
 
 impl ColdStorageProof {
     /// Verify the cold storage proof
-    pub fn verify(&self, encryption_keys: &EncryptionKeys) -> KeyShareProofResult<()> {
+    pub fn verify(
+        &self,
+        encryption_keys: &EncryptionKeys,
+        block_id: u64,
+    ) -> KeyShareProofResult<()> {
         let mut bytes = [0u8; 192 + 8];
         bytes[..96].copy_from_slice(self.a1.to_compressed().as_ref());
         bytes[96..192].copy_from_slice(self.a2.to_compressed().as_ref());
-        bytes[192..].copy_from_slice(&1000u64.to_be_bytes());
+        bytes[192..].copy_from_slice(&block_id.to_be_bytes());
         let c = Scalar::hash::<ExpandMsgXmd<sha2::Sha256>>(&bytes, b"BLS12381_XMD:SHA-256_RO_NUL_");
-        let lhs = G2Projective::GENERATOR * self.z1 + self.a1 * c;
-        let rhs = encryption_keys.0[0].0 * self.z1 + encryption_keys.0[1].0 * self.z2;
-        let result = lhs - rhs;
-        if result.is_identity().into() {
+        // let lhs = G2Projective::GENERATOR * self.z1 + self.a1 * c;
+        // let rhs = encryption_keys.0[0].0 * self.z1 + encryption_keys.0[1].0 * self.z2;
+        let lhs1 = G2Projective::GENERATOR * self.z1;
+        let rhs1 = self.a1 + encryption_keys.0[0].0 * c;
+        let result1 = lhs1 - rhs1;
+        let lhs2 = G2Projective::GENERATOR * self.z2;
+        let rhs2 = self.a2 + encryption_keys.0[1].0 * c;
+        let result2 = lhs2 - rhs2;
+        if (result1.is_identity() & result2.is_identity()).into() {
             Ok(())
         } else {
             Err(KeyShareProofError::General(
@@ -497,5 +506,15 @@ mod tests {
                 .refresh_untrusted(&refresh_commitment, refresh_payload, &crs)
                 .is_ok());
         }
+    }
+
+    #[test]
+    fn test_cold_proof() {
+        let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
+        let dks = DecryptionKeys::random(&mut rng);
+        let eks = EncryptionKeys::from(&dks);
+
+        let cold_proof = dks.prove(0);
+        assert!(cold_proof.verify(&eks, 0).is_ok());
     }
 }
