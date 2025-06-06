@@ -1,11 +1,7 @@
 use crate::client::VerificationKey;
-use crate::{encrypt::*, SigningKey};
+use crate::{encrypt::*, ClientRefreshPayload};
 use crate::{
-    // DensePolyPrimeField,
-    KZG10CommonReferenceParams,
-    KeyShareProofError,
-    KeyShareProofResult,
-    PedersenCommitmentParams,
+    KZG10CommonReferenceParams, KeyShareProofError, KeyShareProofResult, PedersenCommitmentParams,
     Universal,
 };
 use blsful::inner_types::*;
@@ -325,188 +321,13 @@ impl ClientRegisterPayload {
     }
 }
 
-/// The payload for the share refresh when refreshing encrypted shares
-#[derive(Debug, Copy, Clone, Deserialize, Serialize, Default)]
-pub struct ClientRefreshPayload {
-    /// The share index
-    pub share_id: usize,
-    /// The party's share of zero
-    pub share: Scalar,
-    /// The opening proof
-    pub proof: G1Projective,
-}
-/// Generate shares of zero to refresh hot key shares
-/// Returns refresh payload for each client, plus commitment to refresh polynomial
-pub fn generate_refresh_payloads(
-    threshold: usize,
-    num_shares: usize,
-    crs: &KZG10CommonReferenceParams,
-    mut rng: impl RngCore + CryptoRng,
-) -> KeyShareProofResult<(Vec<ClientRefreshPayload>, G1Projective)> {
-    let zero = SigningKey(Scalar::ZERO);
-    let (ref_shares, zero_poly) = zero.create_shares(threshold, num_shares, &crs, &mut rng)?;
-    let commitment = crs.commit_g1(&zero_poly);
-    let opening_proofs = crs.batch_open(&zero_poly, ref_shares.len());
-
-    let mut refresh_payloads = vec![ClientRefreshPayload::default(); ref_shares.len()];
-    for (i, payload) in refresh_payloads.iter_mut().enumerate() {
-        payload.share_id = ref_shares[i].id;
-        payload.share = ref_shares[i].share;
-        payload.proof = opening_proofs[i];
-        // payload.verification_share = G2Projective::GENERATOR * shares[i].share;
-    }
-
-    Ok((refresh_payloads, commitment))
-}
-/// Generate shares of zero to refresh hot key shares with additional components
-/// to independently verify correctness
-/// Additionally returns commitment, dcom, and opening at zero
-pub fn generate_refresh_payloads_untrusted(
-    threshold: usize,
-    num_shares: usize,
-    crs: &KZG10CommonReferenceParams,
-    mut rng: impl RngCore + CryptoRng,
-) -> KeyShareProofResult<(
-    Vec<ClientRefreshPayload>,
-    (G1Projective, G1Projective, G1Projective),
-)> {
-    let zero = SigningKey(Scalar::ZERO);
-    let (ref_shares, zero_poly) = zero.create_shares(threshold, num_shares, &crs, &mut rng)?;
-    let commitment = crs.commit_g1(&zero_poly);
-    let opening_proofs = crs.batch_open(&zero_poly, ref_shares.len());
-    // open at zero
-    let zero_opening = crs.open(&zero_poly, Scalar::ZERO);
-    // degree commitment to ensure zero_poly has correct degree
-    let d = crs.powers_of_g.len() - 1;
-    let mut degree_shift = vec![Scalar::ZERO; d - threshold + 2];
-    degree_shift[d - threshold + 1] = Scalar::ONE;
-    let degree_poly = &zero_poly * crate::DensePolyPrimeField(degree_shift);
-    let dcom = crs.commit_g1(&degree_poly);
-
-    let mut refresh_payloads = vec![ClientRefreshPayload::default(); ref_shares.len()];
-    for (i, payload) in refresh_payloads.iter_mut().enumerate() {
-        payload.share_id = ref_shares[i].id;
-        payload.share = ref_shares[i].share;
-        payload.proof = opening_proofs[i];
-        // payload.verification_share = G2Projective::GENERATOR * shares[i].share;
-    }
-
-    Ok((refresh_payloads, (commitment, dcom, zero_opening)))
-}
-
-/// Verify the public/global refresh information in the case of an untrusted refresh.
-/// Checks the opening at zero and the degree of the refresh commitment
-pub fn verify_update_global(
-    crs: &KZG10CommonReferenceParams,
-    threshold: usize,
-    refresh_commitment: &G1Projective,
-    dcom: G1Projective,
-    zero_opening: G1Projective,
-) -> KeyShareProofResult<()> {
-    let challenge = Scalar::ZERO;
-    let d = crs.powers_of_g.len() - 1;
-    // check opening at zero
-    if crs.verify(&refresh_commitment, challenge, Scalar::ZERO, &zero_opening).is_ok()
-        // check dcom
-        & bool::from(multi_miller_loop(&[
-            (
-                &dcom.to_affine(),
-                &G2Prepared::from(-G2Projective::GENERATOR.to_affine()),
-            ),
-            (
-                &refresh_commitment.to_affine(),
-                &G2Prepared::from(crs.powers_of_h[d - threshold + 1].to_affine()),
-            ),
-        ])
-        .final_exponentiation()
-        .is_identity()
-    ) {
-        Ok(())
-    } else {
-        Err(KeyShareProofError::InvalidRefresh)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SigningKey;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::num::NonZeroUsize;
-
-    #[test]
-    fn test_refresh() {
-        let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
-        let threshold = 3;
-        let num_parties = 5;
-        let crs = KZG10CommonReferenceParams::setup(
-            NonZeroUsize::new(num_parties - 1).unwrap(),
-            &mut rng,
-        );
-
-        let sk = SigningKey(Scalar::random(&mut rng));
-        let dks_set = (0..num_parties)
-            .map(|_| DecryptionKeys::random(&mut rng))
-            .collect::<Vec<_>>();
-        let eks_set = dks_set
-            .iter()
-            .map(|dk| EncryptionKeys::from(dk))
-            .collect::<Vec<_>>();
-        let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
-        let payloads = payloads_res.unwrap();
-
-        // get refresh information
-        let refresh_payloads_res = generate_refresh_payloads(threshold, num_parties, &crs, rng);
-        assert!(refresh_payloads_res.is_ok());
-        let (refresh_payloads, refresh_commitment) = refresh_payloads_res.unwrap();
-
-        // refresh the shares
-        for (payload, refresh_payload) in payloads.iter().zip(refresh_payloads.iter()) {
-            assert!(payload
-                .refresh(&refresh_commitment, refresh_payload)
-                .is_ok());
-        }
-    }
-
-    #[test]
-    fn test_refresh_untrusted() {
-        let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
-        let threshold = 2;
-        let num_parties = 3;
-        let crs = KZG10CommonReferenceParams::setup_extended(
-            NonZeroUsize::new(num_parties - 1).unwrap(),
-            &mut rng,
-        );
-
-        let sk = SigningKey(Scalar::random(&mut rng));
-        let dks_set = (0..num_parties)
-            .map(|_| DecryptionKeys::random(&mut rng))
-            .collect::<Vec<_>>();
-        let eks_set = dks_set
-            .iter()
-            .map(|dk| EncryptionKeys::from(dk))
-            .collect::<Vec<_>>();
-        let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
-        let payloads = payloads_res.unwrap();
-
-        // get refresh information
-        let refresh_payloads_res =
-            generate_refresh_payloads_untrusted(threshold, num_parties, &crs, rng);
-        assert!(refresh_payloads_res.is_ok());
-        let (refresh_payloads, (refresh_commitment, dcom, zero_opening)) =
-            refresh_payloads_res.unwrap();
-
-        assert!(
-            verify_update_global(&crs, threshold, &refresh_commitment, dcom, zero_opening).is_ok()
-        );
-
-        // refresh the shares
-        for (payload, refresh_payload) in payloads.iter().zip(refresh_payloads.iter()) {
-            assert!(payload
-                .refresh_untrusted(&refresh_commitment, refresh_payload, &crs)
-                .is_ok());
-        }
-    }
 
     #[test]
     fn test_cold_proof() {
@@ -516,5 +337,44 @@ mod tests {
 
         let cold_proof = dks.prove(0);
         assert!(cold_proof.verify(&eks, 0).is_ok());
+    }
+
+    #[test]
+    fn test_hot_proof() {
+        let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
+        let sk = SigningKey(Scalar::random(&mut rng));
+        let threshold = 2;
+        let num_shares = 3;
+        let crs =
+            KZG10CommonReferenceParams::setup(NonZeroUsize::new(num_shares - 1).unwrap(), &mut rng);
+
+        let dks_set = (0..3)
+            .map(|_| DecryptionKeys::random(&mut rng))
+            .collect::<Vec<_>>();
+        let eks_set = dks_set
+            .iter()
+            .map(|dk| EncryptionKeys::from(dk))
+            .collect::<Vec<_>>();
+
+        let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
+        let payloads = payloads_res.unwrap();
+
+        for (payload, eks) in payloads.iter().zip(eks_set.iter()) {
+            let hot_proof = eks.prove(
+                &crs,
+                crs.omega.pow_vartime([payload.share_id as u64]),
+                payload.encrypted_share,
+                payload.proof,
+                0,
+            );
+            assert!(hot_proof
+                .verify(
+                    &crs,
+                    &payload.commitment,
+                    crs.omega.pow_vartime([payload.share_id as u64]),
+                    0
+                )
+                .is_ok());
+        }
     }
 }
