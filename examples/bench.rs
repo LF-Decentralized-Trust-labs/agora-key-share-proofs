@@ -1,8 +1,9 @@
 extern crate agora_key_share_proofs;
 
 use agora_key_share_proofs::{
-    generate_refresh_payloads, DecryptionKeys, EncryptionKeys, KZG10CommonReferenceParams,
-    Signature, SigningKey, VerificationKey,
+    generate_refresh_payloads, generate_refresh_payloads_untrusted, verify_update_global,
+    DecryptionKeys, EncryptionKeys, KZG10CommonReferenceParams, Signature, SigningKey,
+    VerificationKey,
 };
 use blsful::inner_types::{Field, Scalar};
 use rand::SeedableRng;
@@ -95,8 +96,12 @@ fn main() {
 
     /***** Setup system parameters *****/
     let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
-    let crs =
-        KZG10CommonReferenceParams::setup(NonZeroUsize::new(num_parties - 1).unwrap(), &mut rng);
+    // let crs =
+    //     KZG10CommonReferenceParams::setup(NonZeroUsize::new(num_parties - 1).unwrap(), &mut rng);
+    let crs = KZG10CommonReferenceParams::setup_extended(
+        NonZeroUsize::new(num_parties - 1).unwrap(),
+        &mut rng,
+    );
 
     /***** Begin benchmarking *****/
     // ColdRegister
@@ -133,14 +138,11 @@ fn main() {
     counter = 0;
     println!("Registering {} new clients (new backups)", samples);
     let start = Instant::now();
-    let (vk, payloads) = loop {
+    let (vk, hot_shares) = loop {
         counter += 1;
 
         let sk = SigningKey(Scalar::random(&mut rng));
         let vk = VerificationKey::from(&sk);
-        let shares = sk
-            .create_shares(threshold, num_parties, &crs, &mut rng)
-            .unwrap();
 
         let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
         assert!(payloads_res.is_ok());
@@ -204,7 +206,7 @@ fn main() {
     println!("Doing share refreshes for {} parties", num_parties);
     let start = Instant::now();
     // - client generates shares of zero
-    let refresh_payload_res = generate_refresh_payloads(threshold, num_parties, &crs, rng);
+    let refresh_payload_res = generate_refresh_payloads(threshold, num_parties, &crs, &mut rng);
     let (refresh_payloads, refresh_commitment) = refresh_payload_res.unwrap();
     let client_ref_time = start.elapsed();
     println!("done");
@@ -212,24 +214,69 @@ fn main() {
     let start = Instant::now();
     // - hot parties update their key shares
     for (hot_share, refresh_payload) in hot_shares.iter().zip(refresh_payloads.iter()) {
-        let refresh_res = hot_share.refresh(&refresh_commitment, refresh_payload, &crs);
+        let refresh_res = hot_share.refresh(&refresh_commitment, refresh_payload);
         assert!(refresh_res.is_ok());
     }
     let hot_ref_time = start.elapsed();
     println!("done");
 
     println!("time for client refresh: {:?}", client_ref_time);
-    writeln!(file, "refresh (client):\t{:?}", client_ref_time).unwrap_or_else(|err| {
+    let hot_ref_avg = hot_ref_time / num_parties as u32;
+    println!("average time per hot refresh: {:?}", hot_ref_avg);
+    println!();
+
+    // Share Refresh (untrusted)
+    println!(
+        "Doing *untrusted* share refreshes for {} parties",
+        num_parties
+    );
+    let start = Instant::now();
+    // - client generates shares of zero
+    let refresh_payload_res =
+        generate_refresh_payloads_untrusted(threshold, num_parties, &crs, &mut rng);
+    let (refresh_payloads, (refresh_commitment, dcom, zero_opening)) = refresh_payload_res.unwrap();
+    // perform global checks
+    let _ = verify_update_global(&crs, threshold, &refresh_commitment, dcom, zero_opening).is_ok();
+    let client_uref_time = start.elapsed();
+    println!("done");
+
+    let start = Instant::now();
+    // - hot parties update their key shares
+    for (hot_share, refresh_payload) in hot_shares.iter().zip(refresh_payloads.iter()) {
+        let refresh_res = hot_share.refresh_untrusted(&refresh_commitment, refresh_payload, &crs);
+        assert!(refresh_res.is_ok());
+    }
+    let hot_uref_time = start.elapsed();
+    println!("done");
+
+    println!(
+        "time for client refresh (untrusted): {:?}",
+        client_uref_time
+    );
+    let hot_uref_avg = hot_uref_time / num_parties as u32;
+    println!(
+        "average time per hot refresh (untrusted): {:?}",
+        hot_uref_avg
+    );
+    println!();
+
+    // write trusted & untrusted refresh times to file
+    write!(file, "refresh (client):\t{:?}", client_ref_time).unwrap_or_else(|err| {
         eprintln!("Problem writing client refresh time to file: {err}");
         process::exit(1);
     });
-    let hot_ref_avg = hot_ref_time / num_parties as u32;
-    println!("average time per hot refresh: {:?}", hot_ref_avg);
-    writeln!(file, "refresh (hot):\t\t{:?}", hot_ref_avg).unwrap_or_else(|err| {
+    writeln!(file, "\tuntrusted:\t{:?}", client_uref_time).unwrap_or_else(|err| {
+        eprintln!("Problem writing client refresh (untrusted) time to file: {err}");
+        process::exit(1);
+    });
+    write!(file, "refresh (hot):\t\t{:?}", hot_ref_avg).unwrap_or_else(|err| {
         eprintln!("Problem writing hot refresh avg to file: {err}");
         process::exit(1);
     });
-    println!();
+    writeln!(file, "\tuntrusted:\t{:?}", hot_uref_avg).unwrap_or_else(|err| {
+        eprintln!("Problem writing hot refresh (untrusted) avg to file: {err}");
+        process::exit(1);
+    });
 
     // Cold Proof
     println!(

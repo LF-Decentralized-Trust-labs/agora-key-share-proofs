@@ -282,8 +282,22 @@ pub struct ClientRegisterPayload {
     pub proof: G1Projective,
 }
 impl ClientRegisterPayload {
-    /// Use refresh value to update hot key share
+    /// Use refresh value to update hot key share (without verifying it first)
     pub fn refresh(
+        &self,
+        refresh_commitment: &G1Projective,
+        refresh_payload: &ClientRefreshPayload,
+    ) -> KeyShareProofResult<ClientRegisterPayload> {
+        Ok(ClientRegisterPayload {
+            share_id: self.share_id,
+            encrypted_share: self.encrypted_share + refresh_payload.share,
+            verification_share: self.verification_share * refresh_payload.share,
+            commitment: self.commitment + refresh_commitment,
+            proof: self.proof + refresh_payload.proof,
+        })
+    }
+    /// Verify refresh value before using it to update hot key share
+    pub fn refresh_untrusted(
         &self,
         refresh_commitment: &G1Projective,
         refresh_payload: &ClientRefreshPayload,
@@ -298,15 +312,7 @@ impl ClientRegisterPayload {
             refresh_payload.share,
             &refresh_payload.proof,
         )?;
-
-        // update the share
-        Ok(ClientRegisterPayload {
-            share_id: self.share_id,
-            encrypted_share: self.encrypted_share + refresh_payload.share,
-            verification_share: self.verification_share * refresh_payload.share,
-            commitment: self.commitment + refresh_commitment,
-            proof: self.proof + refresh_payload.proof,
-        })
+        self.refresh(refresh_commitment, refresh_payload)
     }
 }
 
@@ -360,7 +366,7 @@ pub fn generate_refresh_payloads_untrusted(
     let commitment = crs.commit_g1(&zero_poly);
     let opening_proofs = crs.batch_open(&zero_poly, ref_shares.len());
     // open at zero
-    let zero_proof = crs.open(&zero_poly, Scalar::ZERO);
+    let zero_opening = crs.open(&zero_poly, Scalar::ZERO);
     // degree commitment to ensure zero_poly has correct degree
     let d = crs.powers_of_g.len() - 1;
     let mut degree_shift = vec![Scalar::ZERO; d - threshold + 2];
@@ -376,7 +382,40 @@ pub fn generate_refresh_payloads_untrusted(
         // payload.verification_share = G2Projective::GENERATOR * shares[i].share;
     }
 
-    Ok((refresh_payloads, (commitment, dcom, zero_proof)))
+    Ok((refresh_payloads, (commitment, dcom, zero_opening)))
+}
+
+/// Verify the public/global refresh information in the case of an untrusted refresh.
+/// Checks the opening at zero and the degree of the refresh commitment
+pub fn verify_update_global(
+    crs: &KZG10CommonReferenceParams,
+    threshold: usize,
+    refresh_commitment: &G1Projective,
+    dcom: G1Projective,
+    zero_opening: G1Projective,
+) -> KeyShareProofResult<()> {
+    let challenge = Scalar::ZERO;
+    let d = crs.powers_of_g.len() - 1;
+    // check opening at zero
+    if crs.verify(&refresh_commitment, challenge, Scalar::ZERO, &zero_opening).is_ok()
+        // check dcom
+        & bool::from(multi_miller_loop(&[
+            (
+                &dcom.to_affine(),
+                &G2Prepared::from(-G2Projective::GENERATOR.to_affine()),
+            ),
+            (
+                &refresh_commitment.to_affine(),
+                &G2Prepared::from(crs.powers_of_h[d - threshold + 1].to_affine()),
+            ),
+        ])
+        .final_exponentiation()
+        .is_identity()
+    ) {
+        Ok(())
+    } else {
+        Err(KeyShareProofError::InvalidRefresh)
+    }
 }
 
 #[cfg(test)]
@@ -415,7 +454,7 @@ mod tests {
         // refresh the shares
         for (payload, refresh_payload) in payloads.iter().zip(refresh_payloads.iter()) {
             assert!(payload
-                .refresh(&refresh_commitment, refresh_payload, &crs)
+                .refresh(&refresh_commitment, refresh_payload)
                 .is_ok());
         }
     }
@@ -448,33 +487,14 @@ mod tests {
         let (refresh_payloads, (refresh_commitment, dcom, zero_opening)) =
             refresh_payloads_res.unwrap();
 
-        // global checks
-        // - check opening at zero
-        let challenge = Scalar::ZERO;
-        assert!(crs
-            .verify(&refresh_commitment, challenge, Scalar::ZERO, &zero_opening)
-            .is_ok());
-        // - check dcom
-        let d = crs.powers_of_g.len() - 1;
-        assert!(bool::from(
-            multi_miller_loop(&[
-                (
-                    &dcom.to_affine(),
-                    &G2Prepared::from(-G2Projective::GENERATOR.to_affine()),
-                ),
-                (
-                    &refresh_commitment.to_affine(),
-                    &G2Prepared::from(crs.powers_of_h[d - threshold + 1].to_affine()),
-                ),
-            ])
-            .final_exponentiation()
-            .is_identity()
-        ));
+        assert!(
+            verify_update_global(&crs, threshold, &refresh_commitment, dcom, zero_opening).is_ok()
+        );
 
         // refresh the shares
         for (payload, refresh_payload) in payloads.iter().zip(refresh_payloads.iter()) {
             assert!(payload
-                .refresh(&refresh_commitment, refresh_payload, &crs)
+                .refresh_untrusted(&refresh_commitment, refresh_payload, &crs)
                 .is_ok());
         }
     }

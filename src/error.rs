@@ -9,6 +9,9 @@ pub enum KeyShareProofError {
     /// The proof is invalid
     #[error("Pedersen ZK Proof verification failed")]
     InvalidPedersenProof,
+    /// The proof is invalid
+    #[error("Global refresh verification failed")]
+    InvalidRefresh,
 }
 
 /// Result type for key share proof operations
