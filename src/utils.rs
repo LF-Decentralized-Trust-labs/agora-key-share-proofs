@@ -55,3 +55,16 @@ pub fn get_omega(n: usize) -> Scalar {
 
     Scalar::from_uint_unchecked(omega.resize())
 }
+
+pub fn lagrange(id: Scalar, others: &[Scalar]) -> Scalar {
+    let mut num = Scalar::ONE;
+    let mut den = Scalar::ONE;
+    for &j in others {
+        if id == j {
+            continue;
+        }
+        num *= j;
+        den *= j - id;
+    }
+    num * den.invert().expect("denominator is zero")
+}

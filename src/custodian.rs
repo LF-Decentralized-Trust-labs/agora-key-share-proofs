@@ -1,8 +1,7 @@
 use crate::client::VerificationKey;
-use crate::{encrypt::*, ClientRefreshPayload};
 use crate::{
-    KZG10CommonReferenceParams, KeyShareProofError, KeyShareProofResult, PedersenCommitmentParams,
-    Universal,
+    encrypt::*, utils::lagrange, ClientRefreshPayload, KZG10CommonReferenceParams,
+    KeyShareProofError, KeyShareProofResult, PedersenCommitmentParams, Universal,
 };
 use blsful::inner_types::*;
 use rand::{CryptoRng, RngCore};
@@ -123,12 +122,16 @@ pub struct Signature(pub G1Projective);
 impl Signature {
     /// Reconstruct a signature from a list of signatures without checking
     /// whether the signatures are valid
-    pub fn reconstruct_unchecked(signatures: &[(HotSignature, ColdSignature)]) -> Self {
+    pub fn reconstruct_unchecked(
+        signatures: &[(HotSignature, ColdSignature)],
+        challenges: &[Scalar],
+    ) -> Self {
         Signature(
             signatures
                 .iter()
-                .fold(G1Projective::IDENTITY, |acc, &(hot, cold)| {
-                    acc + (hot.0 - cold.0)
+                .zip(challenges.iter())
+                .fold(G1Projective::IDENTITY, |acc, (&(hot, cold), x)| {
+                    acc + (hot.0 - cold.0) * lagrange(*x, challenges)
                 }),
         )
     }
@@ -289,25 +292,23 @@ pub struct ClientRegisterPayload {
 impl ClientRegisterPayload {
     /// Use refresh value to update hot key share (without verifying it first)
     pub fn refresh(
-        &self,
+        &mut self,
         refresh_commitment: &G1Projective,
         refresh_payload: &ClientRefreshPayload,
-    ) -> KeyShareProofResult<ClientRegisterPayload> {
-        Ok(ClientRegisterPayload {
-            share_id: self.share_id,
-            encrypted_share: self.encrypted_share + refresh_payload.share,
-            verification_share: self.verification_share * refresh_payload.share,
-            commitment: self.commitment + refresh_commitment,
-            proof: self.proof + refresh_payload.proof,
-        })
+    ) -> KeyShareProofResult<()> {
+        self.encrypted_share += refresh_payload.share;
+        self.verification_share *= refresh_payload.share;
+        self.commitment += refresh_commitment;
+        self.proof += refresh_payload.proof;
+        Ok(())
     }
     /// Verify refresh value before using it to update hot key share
     pub fn refresh_untrusted(
-        &self,
+        &mut self,
         refresh_commitment: &G1Projective,
         refresh_payload: &ClientRefreshPayload,
         crs: &KZG10CommonReferenceParams,
-    ) -> KeyShareProofResult<ClientRegisterPayload> {
+    ) -> KeyShareProofResult<()> {
         // use *current* share to determine eval point
         let eval_point = crs.omega.pow_vartime([self.share_id as u64]);
         // verify the refresh share
@@ -324,7 +325,7 @@ impl ClientRegisterPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SigningKey;
+    use crate::{generate_refresh_payloads, SigningKey};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::num::NonZeroUsize;
@@ -376,5 +377,79 @@ mod tests {
                 )
                 .is_ok());
         }
+    }
+
+    #[test]
+    fn test_signature() {
+        let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
+        let sk = SigningKey(Scalar::random(&mut rng));
+        let vk = VerificationKey::from(&sk);
+        let threshold = 2;
+        let num_shares = 3;
+        let crs =
+            KZG10CommonReferenceParams::setup(NonZeroUsize::new(num_shares - 1).unwrap(), &mut rng);
+
+        // set up shares
+        let dks_set = (0..3)
+            .map(|_| DecryptionKeys::random(&mut rng))
+            .collect::<Vec<_>>();
+        let eks_set = dks_set
+            .iter()
+            .map(|dk| EncryptionKeys::from(dk))
+            .collect::<Vec<_>>();
+
+        let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
+        let mut hot_shares = payloads_res.unwrap();
+        let challenges = hot_shares
+            .iter()
+            .map(|&s| crs.omega.pow_vartime([s.share_id as u64]))
+            .collect::<Vec<_>>();
+
+        // sign
+        let message = b"dummy message";
+        let cold_sigs = dks_set
+            .iter()
+            .map(|dk| dk.sign(vk, message))
+            .collect::<Vec<_>>();
+        let hot_sigs = hot_shares
+            .iter()
+            .zip(eks_set.iter())
+            .map(|(hot_share, eks)| eks.sign(hot_share.encrypted_share, message))
+            .collect::<Vec<_>>();
+        let sig_pairs = hot_sigs
+            .iter()
+            .zip(cold_sigs.iter())
+            .map(|(hot_sig, cold_sig)| (*hot_sig, *cold_sig))
+            .collect::<Vec<_>>();
+        let sig = Signature::reconstruct_unchecked(sig_pairs.as_slice(), challenges.as_slice());
+
+        assert!(bool::from(sig.verify(vk, message)));
+
+        // refresh
+        let refresh_payload_res = generate_refresh_payloads(threshold, num_shares, &crs, &mut rng);
+        let (refresh_payloads, refresh_commitment) = refresh_payload_res.unwrap();
+        for (hot_share, refresh_payload) in hot_shares.iter_mut().zip(refresh_payloads.iter()) {
+            let refresh_res = hot_share.refresh(&refresh_commitment, refresh_payload);
+        }
+
+        // sign again
+        let message = b"dummy message";
+        let cold_sigs = dks_set
+            .iter()
+            .map(|dk| dk.sign(vk, message))
+            .collect::<Vec<_>>();
+        let hot_sigs = hot_shares
+            .iter()
+            .zip(eks_set.iter())
+            .map(|(hot_share, eks)| eks.sign(hot_share.encrypted_share, message))
+            .collect::<Vec<_>>();
+        let sig_pairs = hot_sigs
+            .iter()
+            .zip(cold_sigs.iter())
+            .map(|(hot_sig, cold_sig)| (*hot_sig, *cold_sig))
+            .collect::<Vec<_>>();
+        let sig2 = Signature::reconstruct_unchecked(sig_pairs.as_slice(), challenges.as_slice());
+
+        assert!(bool::from(sig2.verify(vk, message)));
     }
 }

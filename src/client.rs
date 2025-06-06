@@ -1,6 +1,6 @@
 use crate::{
-    ClientRegisterPayload, DensePolyPrimeField, EncryptionKeys, KZG10CommonReferenceParams,
-    KeyShareProofError, KeyShareProofResult, Universal,
+    utils::lagrange, ClientRegisterPayload, DensePolyPrimeField, EncryptionKeys,
+    KZG10CommonReferenceParams, KeyShareProofError, KeyShareProofResult, Universal,
 };
 use blsful::inner_types::*;
 use itertools::*;
@@ -187,19 +187,6 @@ pub struct SigningKeyShare {
     pub(crate) threshold: u16,
 }
 
-fn lagrange(id: Scalar, others: &[Scalar]) -> Scalar {
-    let mut num = Scalar::ONE;
-    let mut den = Scalar::ONE;
-    for &j in others {
-        if id == j {
-            continue;
-        }
-        num *= j;
-        den *= j - id;
-    }
-    num * den.invert().expect("denominator is zero")
-}
-
 /// The payload for the share refresh when refreshing encrypted shares
 #[derive(Debug, Copy, Clone, Deserialize, Serialize, Default)]
 pub struct ClientRefreshPayload {
@@ -369,7 +356,7 @@ mod tests {
             .map(|dk| EncryptionKeys::from(dk))
             .collect::<Vec<_>>();
         let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
-        let payloads = payloads_res.unwrap();
+        let mut payloads = payloads_res.unwrap();
 
         // get refresh information
         let refresh_payloads_res = generate_refresh_payloads(threshold, num_parties, &crs, rng);
@@ -377,7 +364,7 @@ mod tests {
         let (refresh_payloads, refresh_commitment) = refresh_payloads_res.unwrap();
 
         // refresh the shares
-        for (payload, refresh_payload) in payloads.iter().zip(refresh_payloads.iter()) {
+        for (payload, refresh_payload) in payloads.iter_mut().zip(refresh_payloads.iter()) {
             assert!(payload
                 .refresh(&refresh_commitment, refresh_payload)
                 .is_ok());
@@ -403,7 +390,7 @@ mod tests {
             .map(|dk| EncryptionKeys::from(dk))
             .collect::<Vec<_>>();
         let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
-        let payloads = payloads_res.unwrap();
+        let mut payloads = payloads_res.unwrap();
 
         // get refresh information
         let refresh_payloads_res =
@@ -417,7 +404,7 @@ mod tests {
         );
 
         // refresh the shares
-        for (payload, refresh_payload) in payloads.iter().zip(refresh_payloads.iter()) {
+        for (payload, refresh_payload) in payloads.iter_mut().zip(refresh_payloads.iter()) {
             assert!(payload
                 .refresh_untrusted(&refresh_commitment, refresh_payload, &crs)
                 .is_ok());

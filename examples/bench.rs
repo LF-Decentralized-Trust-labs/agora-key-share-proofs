@@ -138,7 +138,7 @@ fn main() {
     counter = 0;
     println!("Registering {} new clients (new backups)", samples);
     let start = Instant::now();
-    let (vk, hot_shares) = loop {
+    let (vk, mut hot_shares) = loop {
         counter += 1;
 
         let sk = SigningKey(Scalar::random(&mut rng));
@@ -213,7 +213,7 @@ fn main() {
 
     let start = Instant::now();
     // - hot parties update their key shares
-    for (hot_share, refresh_payload) in hot_shares.iter().zip(refresh_payloads.iter()) {
+    for (hot_share, refresh_payload) in hot_shares.iter_mut().zip(refresh_payloads.iter()) {
         let refresh_res = hot_share.refresh(&refresh_commitment, refresh_payload);
         assert!(refresh_res.is_ok());
     }
@@ -242,7 +242,7 @@ fn main() {
 
     let start = Instant::now();
     // - hot parties update their key shares
-    for (hot_share, refresh_payload) in hot_shares.iter().zip(refresh_payloads.iter()) {
+    for (hot_share, refresh_payload) in hot_shares.iter_mut().zip(refresh_payloads.iter()) {
         let refresh_res = hot_share.refresh_untrusted(&refresh_commitment, refresh_payload, &crs);
         assert!(refresh_res.is_ok());
     }
