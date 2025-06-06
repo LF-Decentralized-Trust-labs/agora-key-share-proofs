@@ -20,7 +20,7 @@
 )]
 
 mod client;
-mod cold;
+mod custodian;
 mod dense;
 mod encrypt;
 mod error;
@@ -31,7 +31,7 @@ mod sparse;
 mod utils;
 
 pub use client::*;
-pub use cold::*;
+pub use custodian::*;
 pub use dense::*;
 pub use error::*;
 pub use hash::*;
