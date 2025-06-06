@@ -100,19 +100,28 @@ fn main() {
 
     /***** Begin benchmarking *****/
     // ColdRegister
-    println!("Registering {} cold parties", num_parties);
+    let mut counter = 0;
+    println!("Registering {} cold parties {} times", num_parties, samples);
     let start = Instant::now();
-    let dks_set = (0..num_parties)
-        .map(|_| DecryptionKeys::random(&mut rng))
-        .collect::<Vec<_>>();
-    let eks_set = dks_set
-        .iter()
-        .map(|dk| EncryptionKeys::from(dk))
-        .collect::<Vec<_>>();
+    let (dks_set, eks_set) = loop {
+        counter += 1;
+
+        let dks_set = (0..num_parties)
+            .map(|_| DecryptionKeys::random(&mut rng))
+            .collect::<Vec<_>>();
+        let eks_set = dks_set
+            .iter()
+            .map(|dk| EncryptionKeys::from(dk))
+            .collect::<Vec<_>>();
+
+        if counter == samples {
+            break (dks_set, eks_set);
+        }
+    };
     let cold_reg_time = start.elapsed();
     println!("done in {:?}", cold_reg_time);
 
-    let cold_reg_avg = cold_reg_time / num_parties as u32;
+    let cold_reg_avg = cold_reg_time / (num_parties * samples) as u32;
     println!("average time per cold reg: {:?}", cold_reg_avg);
     writeln!(file, "cold reg:\t\t\t{:?}", cold_reg_avg).unwrap_or_else(|err| {
         eprintln!("Problem writing cold reg avg to file: {err}");
@@ -121,19 +130,25 @@ fn main() {
     println!();
 
     // ClientRegister
+    counter = 0;
     println!("Registering {} new clients (new backups)", samples);
     let start = Instant::now();
-    for _ in 0..samples {
+    let (vk, payloads) = loop {
+        counter += 1;
+
         let sk = SigningKey(Scalar::random(&mut rng));
+        let vk = VerificationKey::from(&sk);
         let shares = sk
             .create_shares(threshold, num_parties, &crs, &mut rng)
             .unwrap();
-        let reconstructed = SigningKey::from_shares(&shares.0, &crs).unwrap();
-        assert_eq!(sk, reconstructed);
 
         let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
         assert!(payloads_res.is_ok());
-    }
+
+        if counter == samples {
+            break (vk, payloads_res.unwrap());
+        }
+    };
     let client_reg_time = start.elapsed();
     println!("done in {:?}", client_reg_time);
     let client_reg_avg = client_reg_time / samples as u32;
@@ -144,44 +159,40 @@ fn main() {
     });
     println!();
 
-    // generate vk, hot/cold shares to use for the next benchmarks
-    let sk = SigningKey(Scalar::random(&mut rng));
-    let vk = VerificationKey::from(&sk);
-    let _ = sk
-        .create_shares(threshold, num_parties, &crs, &mut rng)
-        .unwrap();
-    let payloads_res = sk.generate_register_payloads(threshold, &crs, &mut rng, &eks_set);
-    let hot_shares = payloads_res.unwrap();
-
     // TSign
     let message = b"dummy message";
-    println!("Producing {} threshold signatures", num_parties);
+    println!(
+        "Producing {} threshold signatures {} times",
+        num_parties, samples
+    );
     let start = Instant::now();
 
-    let cold_sigs = dks_set
-        .iter()
-        .map(|dk| dk.sign(vk, message))
-        .collect::<Vec<_>>();
-    // let cold_sig_time = start.elapsed();
-    // println!("done in {:?}", cold_sig_time);
+    for _ in 0..samples {
+        let cold_sigs = dks_set
+            .iter()
+            .map(|dk| dk.sign(vk, message))
+            .collect::<Vec<_>>();
+        // let cold_sig_time = start.elapsed();
+        // println!("done in {:?}", cold_sig_time);
 
-    let hot_sigs = hot_shares
-        .iter()
-        .zip(eks_set.iter())
-        .map(|(hot_share, eks)| eks.sign(hot_share.encrypted_share, message))
-        .collect::<Vec<_>>();
-    // let hot_sig_time = start.elapsed();
-    // println!("done in {:?}", hot_sig_time);
+        let hot_sigs = hot_shares
+            .iter()
+            .zip(eks_set.iter())
+            .map(|(hot_share, eks)| eks.sign(hot_share.encrypted_share, message))
+            .collect::<Vec<_>>();
+        // let hot_sig_time = start.elapsed();
+        // println!("done in {:?}", hot_sig_time);
 
-    let _ = hot_sigs
-        .iter()
-        .zip(cold_sigs.iter())
-        .map(|(hot, cold)| Signature(hot.0 - cold.0))
-        .collect::<Vec<_>>();
+        let _ = hot_sigs
+            .iter()
+            .zip(cold_sigs.iter())
+            .map(|(hot, cold)| Signature(hot.0 - cold.0))
+            .collect::<Vec<_>>();
+    }
     let tsig_time = start.elapsed();
     println!("done in {:?}", tsig_time);
 
-    let tsig_avg = tsig_time / num_parties as u32;
+    let tsig_avg = tsig_time / (num_parties * samples) as u32;
     println!("average time per threshold sig: {:?}", tsig_avg);
     writeln!(file, "tsig:\t\t\t\t{:?}", tsig_avg).unwrap_or_else(|err| {
         eprintln!("Problem writing tsig avg to file: {err}");
@@ -221,25 +232,30 @@ fn main() {
     println!();
 
     // Cold Proof
-    println!("Creating and verifying {} cold proofs", num_parties);
+    println!(
+        "Creating and verifying {}*{} cold proofs",
+        num_parties, samples
+    );
     let mut cold_prove_time = Duration::new(0, 0);
     let mut cold_vrfy_time = Duration::new(0, 0);
-    for (dks, eks) in dks_set.iter().zip(eks_set.iter()).collect::<Vec<_>>() {
-        let start = Instant::now();
-        let cold_proof = dks.prove(0);
-        cold_prove_time += start.elapsed();
-        let start = Instant::now();
-        let _ = cold_proof.verify(eks);
-        cold_vrfy_time += start.elapsed();
+    for _ in 0..samples {
+        for (dks, eks) in dks_set.iter().zip(eks_set.iter()).collect::<Vec<_>>() {
+            let start = Instant::now();
+            let cold_proof = dks.prove(0);
+            cold_prove_time += start.elapsed();
+            let start = Instant::now();
+            let _ = cold_proof.verify(eks);
+            cold_vrfy_time += start.elapsed();
+        }
     }
     println!("done");
-    let cold_prove_avg = cold_prove_time / num_parties as u32;
+    let cold_prove_avg = cold_prove_time / (num_parties * samples) as u32;
     println!("average time per cold prove: {:?}", cold_prove_avg);
     writeln!(file, "cold prove:\t\t\t{:?}", cold_prove_avg).unwrap_or_else(|err| {
         eprintln!("Problem writing cold prove avg to file: {err}");
         process::exit(1);
     });
-    let cold_vrfy_avg = cold_vrfy_time / num_parties as u32;
+    let cold_vrfy_avg = cold_vrfy_time / (num_parties * samples) as u32;
     println!("average time per cold vrfy: {:?}", cold_vrfy_avg);
     writeln!(file, "cold vrfy:\t\t\t{:?}", cold_vrfy_avg).unwrap_or_else(|err| {
         eprintln!("Problem writing cold vrfy avg to file: {err}");
@@ -248,38 +264,43 @@ fn main() {
     println!();
 
     // Hot Proof
-    println!("Creating and verifying {} hot proofs", num_parties);
+    println!(
+        "Creating and verifying {}*{} hot proofs",
+        num_parties, samples
+    );
     let mut hot_prove_time = Duration::new(0, 0);
     let mut hot_vrfy_time = Duration::new(0, 0);
-    for (hot_share, eks) in hot_shares.iter().zip(eks_set.iter()) {
-        let start = Instant::now();
-        let hot_proof = eks.prove(
-            &crs,
-            crs.omega.pow_vartime([hot_share.share_id as u64]),
-            hot_share.encrypted_share,
-            hot_share.proof,
-            0,
-        );
-        hot_prove_time += start.elapsed();
-        let start = Instant::now();
-        assert!(hot_proof
-            .verify(
+    for _ in 0..samples {
+        for (hot_share, eks) in hot_shares.iter().zip(eks_set.iter()) {
+            let start = Instant::now();
+            let hot_proof = eks.prove(
                 &crs,
-                &hot_share.commitment,
                 crs.omega.pow_vartime([hot_share.share_id as u64]),
+                hot_share.encrypted_share,
+                hot_share.proof,
                 0,
-            )
-            .is_ok());
-        hot_vrfy_time += start.elapsed();
+            );
+            hot_prove_time += start.elapsed();
+            let start = Instant::now();
+            assert!(hot_proof
+                .verify(
+                    &crs,
+                    &hot_share.commitment,
+                    crs.omega.pow_vartime([hot_share.share_id as u64]),
+                    0,
+                )
+                .is_ok());
+            hot_vrfy_time += start.elapsed();
+        }
     }
     println!("done");
-    let hot_prove_avg = hot_prove_time / num_parties as u32;
+    let hot_prove_avg = hot_prove_time / (num_parties * samples) as u32;
     println!("average time per hot prove: {:?}", hot_prove_avg);
     writeln!(file, "hot prove:\t\t\t{:?}", hot_prove_avg).unwrap_or_else(|err| {
         eprintln!("Problem writing hot prove avg to file: {err}");
         process::exit(1);
     });
-    let hot_vrfy_avg = hot_vrfy_time / num_parties as u32;
+    let hot_vrfy_avg = hot_vrfy_time / (num_parties * samples) as u32;
     println!("average time per hot vrfy: {:?}", hot_vrfy_avg);
     writeln!(file, "hot vrfy:\t\t\t{:?}", hot_vrfy_avg).unwrap_or_else(|err| {
         eprintln!("Problem writing hot vrfy avg to file: {err}");
