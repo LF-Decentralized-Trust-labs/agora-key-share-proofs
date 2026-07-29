@@ -2,6 +2,8 @@
 
 This crate provides an implementation of Throback, an auditable hot-cold threshold backup system based on BLS signatures.
 
+**WARNING: This is a prototype implementation and has not been audited for security. Use at your own risk.**
+
 ## Usage
 Compile and run the benchmarks with `cargo run -r --example bench [t] [n] [samples]`, where `t` is the threshold number of parties (maximum the total number of parties `n`) required to produce a signature. The default setting is `3` out of `5`. Use `samples` to set the number of iterations to average over for the runtimes. This will write the benchmarks into a file called `benchmarks.txt`.
 
